@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "dev:mcp": "tsx src/mcp/index.ts",
     "dev:daemon": "tsx src/daemon/index.ts",
-    "test": "npm run build && node --test \"dist/**/*.test.js\""
+    "test": "npm run build && node --test \"dist/daemon/*.test.js\" \"dist/shared/*.test.js\"",
+    "test:lsp": "npm run build && node --test --test-concurrency=1 \"dist/integration/*.test.js\"",
+    "test:all": "npm run test && npm run test:lsp"
   },
   "dependencies": {
     "@ast-grep/lang-rust": "^0.0.7",

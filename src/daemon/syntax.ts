@@ -163,7 +163,15 @@ export interface SyntaxNode {
   readonly bytes: ByteRange;
   /** Declared name, when the node names something. */
   readonly name: string | null;
+  /**
+   * The identifier node a declaration is named by. LSP answers questions about
+   * a *position*, and asking about the whole `fn` gives nothing useful — the
+   * question has to be posed at the name token.
+   */
+  readonly nameNode: SyntaxNode | null;
   readonly parent: SyntaxNode | null;
+  /** Identifier nodes directly beneath this one, innermost occurrences first. */
+  identifiers(): SyntaxNode[];
   text(): string;
 }
 
@@ -190,12 +198,34 @@ class Node implements SyntaxNode {
   }
 
   get name(): string | null {
-    try {
-      return this.sg.field("name")?.text() ?? null;
-    } catch {
-      // Grammars vary on whether a `name` field exists for a given kind.
-      return null;
+    return this.nameNode?.text() ?? null;
+  }
+
+  get nameNode(): SyntaxNode | null {
+    // Grammars disagree about what the naming field is called: Rust's
+    // `impl_item` names its subject `type`, not `name`.
+    for (const field of ["name", "type"]) {
+      try {
+        const f = this.sg.field(field);
+        if (f !== null && f !== undefined) return new Node(f, this.tree);
+      } catch {
+        // This kind has no such field; try the next.
+      }
     }
+    return null;
+  }
+
+  identifiers(): SyntaxNode[] {
+    const out: SyntaxNode[] = [];
+    const walk = (sg: SgNode): void => {
+      if (normaliseKind(this.tree.language, String(sg.kind())) === "ident") {
+        out.push(new Node(sg, this.tree));
+        return; // an identifier has no identifiers inside it
+      }
+      for (const child of sg.children()) walk(child);
+    };
+    walk(this.sg);
+    return out;
   }
 
   get parent(): SyntaxNode | null {
@@ -215,6 +245,8 @@ class Node implements SyntaxNode {
 
 export interface SyntaxTree {
   readonly language: Language;
+  /** Whole-file node, for traversals that are not anchored at an offset. */
+  readonly rootNode: SyntaxNode;
   /** Smallest *named* node containing the byte offset — never punctuation. */
   nodeAt(byteOffset: number): SyntaxNode | null;
   /** Innermost-first ancestor chain, structural wrappers filtered out. */
@@ -237,6 +269,10 @@ class Tree implements SyntaxTree {
     readonly offsets: OffsetMap,
     private readonly root: SgNode,
   ) {}
+
+  get rootNode(): SyntaxNode {
+    return new Node(this.root, this);
+  }
 
   nodeAt(byteOffset: number): SyntaxNode | null {
     // ast-grep has no descendant-for-offset primitive, so descend by hand.

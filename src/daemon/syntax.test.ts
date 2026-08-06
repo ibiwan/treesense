@@ -110,3 +110,19 @@ test("a blank line detaches a comment from the item below", () => {
   const range = tree.itemRangeWithDocs(item);
   assert.equal(buf.subarray(range.start, range.end).toString("utf8"), "fn f() {}");
 });
+
+test("identifiers on a declaration line include the declared name", () => {
+  // Regression: scanning by offset and advancing past `nodeAt().bytes.end`
+  // jumps the whole function body, because `nodeAt` on the `fn` keyword
+  // returns the enclosing declaration. The name is then never seen.
+  const buf = Buffer.from(RUST, "utf8");
+  const tree = parse(buf, "rust");
+  const names = tree.rootNode
+    .identifiers()
+    .filter((id) => {
+      const line = RUST.slice(0, buf.subarray(0, id.bytes.start).toString("utf8").length);
+      return line.split("\n").length === 5; // the `pub fn count(...)` line
+    })
+    .map((id) => id.text());
+  assert.ok(names.includes("count"), `expected the declared name, got ${names.join(",")}`);
+});

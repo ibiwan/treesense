@@ -11,8 +11,9 @@
  * First client to connect starts it; it outlives them all.
  */
 
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { rmSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 import { Envelope, type Reply, type Request } from "../shared/protocol.js";
@@ -71,25 +72,64 @@ function handle(ws: Workspace, socket: Socket): void {
   });
 }
 
+/**
+ * Is something actually listening, or is this a leftover file?
+ *
+ * A daemon killed with SIGKILL leaves its socket behind; connecting to that
+ * fails with ECONNREFUSED, which is how a stale entry is told apart from a
+ * live one. Only the stale case may be unlinked.
+ */
+function isServed(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = connect(path);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => resolve(false));
+  });
+}
+
 async function main(): Promise<void> {
   // Dynamic grammars are registered process-wide and exactly once, so this
   // belongs at startup rather than inside a lazy parse.
   registerLanguages();
 
-  const root = process.argv[2] ?? process.cwd();
+  // Canonicalise before anything else sees it. The registry realpaths every
+  // file, so a root that still contains a symlink (/tmp, or any mkdtemp path
+  // on darwin) makes our two halves disagree about the same file: we ask
+  // rust-analyzer about /private/var/... while it indexed /var/... and it
+  // answers "file not found" for a file plainly on disk. DESIGN.md § 2.
+  const requested = process.argv[2] ?? process.cwd();
+  const root = await realpath(requested).catch(() => requested);
   const targetDir = process.env.FLUENT_TARGET_DIR;
 
-  const ws = new Workspace(root, targetDir);
   const path = socketPathFor(root);
+
+  // Never unlink blindly. A socket file that is still being served means
+  // another daemon owns this root, and deleting it would orphan a process
+  // holding a warm index and the entire handle table — while new clients
+  // silently got a daemon whose handles are all void.
+  if (await isServed(path)) {
+    process.stderr.write(`fluentd already serving ${root}\n`);
+    return;
+  }
   rmSync(path, { force: true });
 
+  const ws = new Workspace(root, targetDir);
   const server = createServer((socket) => handle(ws, socket));
 
-  // Without this the process stays alive holding a socket that was never
-  // bound — healthy-looking and unreachable, which is a far worse failure
-  // than exiting. The common cause is sun_path: the kernel caps a unix socket
-  // path near 104 bytes and does not fail loudly when it is exceeded.
   server.on("error", (cause: NodeJS.ErrnoException) => {
+    // Two daemons can clear the check above simultaneously; whoever loses the
+    // bind should stand down rather than fail, because the winner is a
+    // perfectly good daemon for this root and the client will reach it.
+    if (cause.code === "EADDRINUSE") {
+      process.stderr.write(`fluentd lost the startup race for ${root}\n`);
+      process.exit(0);
+    }
+    // Otherwise: staying alive holding a socket that was never bound is worse
+    // than exiting — healthy-looking and unreachable. The usual cause is
+    // sun_path, which the kernel caps near 104 bytes without failing loudly.
     process.stderr.write(`fluentd cannot listen on ${path}: ${cause.message}\n`);
     process.exit(1);
   });

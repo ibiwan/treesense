@@ -1,0 +1,14 @@
+# Fixture workspace for integration tests.
+#
+# DEPENDENCY-FREE ON PURPOSE. Index time is dominated by dependencies, not by
+# our own source, so adding one here slows every LSP test in the suite.
+[workspace]
+members = ["crates/helper"]
+
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "crates/helper" }

@@ -5,7 +5,7 @@
 
 import { FileRegistry } from "./files.js";
 import { HandleTable } from "./handles.js";
-import { RustAnalyzer } from "./lsp.js";
+import { pathToUri, RustAnalyzer } from "./lsp.js";
 
 export class Workspace {
   readonly files: FileRegistry;
@@ -15,6 +15,15 @@ export class Workspace {
   constructor(readonly root: string, targetDir?: string) {
     this.files = new FileRegistry(root);
     this.handles = new HandleTable(this.files);
+
+    // A change we observed and rust-analyzer did not must be announced, or its
+    // snapshot drifts from ours and every position translated between the two
+    // silently stops meaning the same thing. `2` is LSP's `Changed`.
+    this.files.onChange = (path) => {
+      void this.lsp.didChangeWatched(pathToUri(path), 2).catch(() => {
+        // Pre-initialize, or the server is down; the next query will surface it.
+      });
+    };
     this.lsp = new RustAnalyzer(
       targetDir === undefined ? { root } : { root, targetDir },
     );

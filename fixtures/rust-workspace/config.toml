@@ -1,0 +1,5 @@
+# Second no-grammar file, in a different format, so the fallback is not
+# accidentally tied to Markdown.
+[render]
+width = 320
+height = 240

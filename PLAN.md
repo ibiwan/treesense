@@ -17,16 +17,16 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | Address parsing, response rendering |
 | ✅ | `read` (handle and position), density guard, single-line floor |
 | ✅ | **M1** syntax layer — offset conversion, ast-grep binding |
-| 🚧 | **M2** `refs` — first verb that mints handles |
-| ⬜ | **M3** handle lifecycle under mutation |
+| ✅ | **M2** `refs` — first verb that mints handles |
+| 🚧 | **M3** handle lifecycle under mutation |
 | ⬜ | **M4** `edit` |
 | ⬜ | **M5** `find` |
 | ⬜ | **M6** `trace` |
 | ⬜ | **M7** use it against a real workload and measure |
 
-Never yet exercised: **every handle**. No verb mints one, so digests, rebasing,
-`changed:` and `gone` are all untested code. M2 and M3 exist to fix that before
-anything is built on top of them.
+Handles are minted by `refs` as of M2. Still unexercised: **rebasing**, and the
+`changed:` / `gone` resolution paths — nothing mutates a file yet, which is
+what M3 is for.
 
 ## M1 — syntax layer
 
@@ -55,8 +55,18 @@ First verb to mint handles. Two tasks live here that the stub does not mention:
 - **`didChangeWatched`.** The moment `refs` is real, rust-analyzer's snapshot
   can drift from ours. The TODO in `files.ts` becomes load-bearing.
 
-**Verified by:** `refs` on a real tauroid symbol returning hits grouped by file
-and enclosing item, then `read <handle>` returning exactly that node's bytes.
+- [x] byte ↔ LSP position conversion, both encodings
+- [x] address resolution: handle, position, ambiguity → candidates
+- [x] `didChangeWatched` wired via a registry change callback
+- [ ] symbolic addresses (`Widget::count`) — needs `workspace/symbol`
+
+**Done** for handle and position addresses. Against tauroid, `refs` on
+`rgba_to_zrgb` found three references across two files including a cross-crate
+one through `pixel::`, which is real name resolution rather than text matching;
+`read` on a hierarchy handle returned the enclosing test function with its
+`#[test]` attribute attached.
+
+Note the first handles now exist, so M3 is finally reachable.
 
 ## M3 — handle lifecycle
 
@@ -68,6 +78,12 @@ outcome: insert above it (→ `ok`, rebased), change it (→ `changed:`), delete
 
 Validate-then-apply in four phases, dep digests, indentation derived from the
 surrounding buffer, parse-validation before commit, temp-file-and-rename.
+
+Revalidation is phase 1: reread and hash every target *and* dependency
+immediately before commit, never against a snapshot taken earlier. Where a
+referent has moved but is uniquely relocatable, issue a replacement handle and
+proceed; otherwise fail exactly as an expired handle would. That relocation
+path is the `TODO(relocate)` already sitting in `handles.ts`.
 
 **Verified by:** an edit that shifts other outstanding handles, asserting they
 rebase rather than die; and a rejection where a dep changed underneath.
@@ -90,6 +106,39 @@ branches report `macro` / `non-ident-arg` / `depth` rather than simply ending.
 
 Wire into an MCP client and do real work against tauroid. The token-efficiency
 premise is the entire point of the project and is so far entirely untested.
+
+**Take a baseline right after M3, not here.** Measuring tool calls, bytes
+returned, successful target selection and retry frequency once `refs`/`read`
+work gives a number to compare against later. Left until M7, there is nothing
+to compare the finished tool *to*, and the headline claim stays an assertion.
+
+## Testing
+
+Two tiers, because one slow suite is a suite that stops being run.
+
+| | | |
+|---|---|---|
+| `npm test` | unit | hermetic, ~400ms, needs nothing installed |
+| `npm run test:lsp` | integration | needs rust-analyzer on PATH; skips with a message if absent |
+| `npm run test:all` | both | |
+
+Integration tests run against `fixtures/rust-workspace`, and **every run copies
+it to a tmpdir first**. Mutation is the whole point from M3 onward, and
+mutating the committed fixture in place would make runs non-repeatable, leave
+`git status` dirty, and break any two runs that overlap.
+
+The fixture is dependency-free on purpose — index time is dominated by
+dependencies, not by our own source, so a single `[dependencies]` entry would
+slow every LSP test. The suite currently completes in about two seconds
+including a cold index.
+
+Its oddities are load-bearing and each carries a comment naming the behaviour
+it covers: same-scope rebinding for the byte-vs-semantic gap, `é` and `🦀` for
+offset conversion, doc comments and `#[inline]` for `itemRangeWithDocs`,
+`if`-in-`for`-in-`fn` for ancestor chains, a macro and a non-identifier
+argument for M6's stop reasons, a 4000-byte line for the density guard, and a
+`.md`/`.toml` pair for the no-grammar path. Tidying any of them away silently
+removes a test.
 
 ## Verified findings
 
@@ -119,6 +168,12 @@ notification method once — that is how this was settled.
 via `@ast-grep/lang-rust` and `registerDynamicLanguage`, which is
 `@experimental` and must be called exactly once per process. Prebuilt dylibs
 ship for macOS/Linux/Windows, so there is still no compilation at install.
+
+**The workspace root must be canonicalised before rust-analyzer sees it.**
+The registry realpaths every file, so a root still containing a symlink
+(`/tmp`, or any `mkdtemp` path on darwin) makes the two halves disagree about
+the same file: we ask about `/private/var/...` while it indexed `/var/...`, and
+it answers `file not found` for a file plainly on disk.
 
 **Unix socket paths cap near 104 bytes** (`sun_path`). Exceeding it does not
 reliably raise — the daemon can listen successfully and be unreachable.

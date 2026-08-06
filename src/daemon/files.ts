@@ -13,13 +13,16 @@ import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
-import type { ByteRange, FilePath, Generation, LineRange } from "../shared/types.ts";
+import type { ByteRange, FilePath, Generation, LineRange } from "../shared/types.js";
+import { OffsetMap } from "./offsets.js";
 
 export interface FileSnapshot {
   path: FilePath;
   generation: Generation;
   content: Buffer;
   index: LineIndex;
+  /** Carried alongside because every LSP boundary crossing needs it. */
+  offsets: OffsetMap;
 }
 
 /** Byte offsets of each line start, so line<->byte conversion is a binary search. */
@@ -40,6 +43,12 @@ export class LineIndex {
 
   get lineCount(): number {
     return this.starts.length;
+  }
+
+  /** Byte offset where a 1-indexed line begins. Clamped to the file. */
+  startOfLine(line: number): number {
+    const i = Math.max(1, Math.min(line, this.starts.length)) - 1;
+    return this.starts[i]!;
   }
 
   /** 1-indexed line containing `offset`. */
@@ -78,6 +87,7 @@ interface Tracked {
   size: number;
   content: Buffer;
   index: LineIndex;
+  offsets: OffsetMap;
 }
 
 export class FileRegistry {
@@ -95,6 +105,15 @@ export class FileRegistry {
    * anywhere, so cwd is meaningless to a client that says `src/main.rs`.
    */
   constructor(private readonly root: string) {}
+
+  /**
+   * Called whenever a file's generation bumps. The registry deliberately knows
+   * nothing about rust-analyzer — but a change we observed and it did not
+   * leaves its snapshot drifting from ours, and a translation between two
+   * views of one file is only sound while both describe the same bytes. So the
+   * owner of both wires this up. See DESIGN.md § 1.
+   */
+  onChange: ((path: FilePath) => void) | null = null;
 
   get workspaceGen(): Generation {
     return this.workspaceGeneration;
@@ -132,6 +151,7 @@ export class FileRegistry {
         generation: prior.generation,
         content: prior.content,
         index: prior.index,
+        offsets: prior.offsets,
       };
     }
 
@@ -147,15 +167,10 @@ export class FileRegistry {
         generation: prior.generation,
         content: prior.content,
         index: prior.index,
+        offsets: prior.offsets,
       };
     }
 
-    // TODO(sync): a bump detected here is a change rust-analyzer did not make,
-    // so it must be told — `lsp.didChangeWatched(uri, 2)` — or its snapshot
-    // drifts from ours and every position we translate between the two stops
-    // being sound. Silent while REFS is stubbed; wire it before REFS lands.
-    // The registry has no LSP reference by design, so the notification belongs
-    // to whatever owns both (Workspace), not here.
     const next: Tracked = {
       path,
       generation: (prior?.generation ?? 0) + 1,
@@ -163,10 +178,18 @@ export class FileRegistry {
       size: st.size,
       content,
       index: new LineIndex(content),
+      offsets: new OffsetMap(content),
     };
     this.tracked.set(path, next);
     this.workspaceGeneration += 1;
-    return { path, generation: next.generation, content, index: next.index };
+    this.onChange?.(path);
+    return {
+      path,
+      generation: next.generation,
+      content,
+      index: next.index,
+      offsets: next.offsets,
+    };
   }
 
   /** Record a write we performed ourselves, without a re-read round trip. */
@@ -179,9 +202,11 @@ export class FileRegistry {
       size: content.length,
       content,
       index: new LineIndex(content),
+      offsets: new OffsetMap(content),
     };
     this.tracked.set(path, next);
     this.workspaceGeneration += 1;
+    this.onChange?.(path);
     return next.generation;
   }
 }
