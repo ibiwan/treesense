@@ -1,0 +1,33 @@
+{
+  "name": "mcp-fluent",
+  "version": "0.0.1",
+  "description": "LLM-optimized editing vocabulary over LSP and tree-sitter, behind a thin unifying MCP facade",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mcp-fluent": "./dist/mcp/index.js",
+    "fluentd": "./dist/daemon/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev:mcp": "tsx src/mcp/index.ts",
+    "dev:daemon": "tsx src/daemon/index.ts",
+    "test": "npm run build && node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@ast-grep/lang-rust": "^0.0.7",
+    "@ast-grep/napi": "^0.39.5",
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
