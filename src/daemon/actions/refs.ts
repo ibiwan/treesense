@@ -8,8 +8,10 @@
  *                        dozens of identifiers, but the obvious reading is
  *                        references to `render`; enumerating its body would
  *                        be useless.
- *   anything else     -> enumerate the distinct symbols inside it, deduped by
- *                        resolved symbol rather than by occurrence.
+ *   anything else     -> enumerate the identifier occurrences inside it.
+ *                        NOT deduplicated by spelling: two `x`s may be two
+ *                        bindings, and collapsing them drops the very choice
+ *                        the caller is being asked to make.
  *
  * Never cache a result and edit from it. References are a semantic claim, and
  * a handle only asserts byte identity — a shadowing binding inserted between
@@ -17,14 +19,14 @@
  * symbol means. Re-run against current state instead.
  */
 
-import { parseAddress } from "../../shared/address.js";
+import { formatLineRange, parseAddress } from "../../shared/address.js";
 import { renderHits } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
 import type { FilePath, Full, Hit } from "../../shared/types.js";
 import {
   declares,
-  distinctIdentifiers,
-  identifiersOnLine,
+  identifiersInRange,
+  identifiersWithin,
   locate,
   mint,
   questionNode,
@@ -144,7 +146,7 @@ async function anchorFor(ws: Workspace, target: string): Promise<Resolution> {
     const located = await locate(ws, resolved.full.file);
     if (located === null) return { error: `no grammar for ${resolved.full.file}` };
 
-    const node = located.tree.nodeAt(resolved.full.bytes.start);
+    const node = located.tree.nodeAt(resolved.full.anchor);
     if (node === null) return { error: `${address.handle} no longer resolves to a node` };
 
     const question = questionNode(located.tree, node);
@@ -152,7 +154,7 @@ async function anchorFor(ws: Workspace, target: string): Promise<Resolution> {
 
     // A statement or block names nothing of its own, so the caller has to say
     // which of the symbols inside it they meant.
-    const inside = distinctIdentifiers(node);
+    const inside = identifiersWithin(node);
     if (inside.length === 1) return { located, node: inside[0]! };
     return { candidates: { located, nodes: inside, where: `${address.handle}` } };
   }
@@ -163,12 +165,11 @@ async function anchorFor(ws: Workspace, target: string): Promise<Resolution> {
     if (located === null) return { error: `no grammar for ${address.path}` };
     if (address.lines === null) return { error: "refs needs a line, not a whole file" };
 
-    const idents = identifiersOnLine(located, address.lines.start);
-    if (idents.length === 0) return { error: `no symbols on ${address.path}:${address.lines.start}` };
+    const span = formatLineRange(address.lines).slice(1);
+    const idents = identifiersInRange(located, address.lines);
+    if (idents.length === 0) return { error: `no symbols on ${address.path}:${span}` };
     if (idents.length === 1) return { located, node: idents[0]! };
-    return {
-      candidates: { located, nodes: idents, where: `${address.path}:${address.lines.start}` },
-    };
+    return { candidates: { located, nodes: idents, where: `${address.path}:${span}` } };
   }
 
   return { error: `symbolic addresses are not implemented yet (${address.symbol})` };
@@ -196,7 +197,12 @@ function candidates(
     .sort((a, b) => Number(b.declaration !== null) - Number(a.declaration !== null));
 
   const lines = ranked.map(({ node, declaration }) => {
-    const full = mint(ws, located, node);
+    // Hand back the declaration itself when the identifier names one, not the
+    // name token. Both feed back into `refs` identically, but only the
+    // declaration is a useful `read` or `edit` target — and only it carries a
+    // qualified name, which is what lets a handle survive relocation after an
+    // external change.
+    const full = mint(ws, located, declaration ?? node);
     const item = declaration ?? located.tree.enclosingItem(node);
     const context =
       declaration !== null

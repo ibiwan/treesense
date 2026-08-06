@@ -100,9 +100,21 @@ rebinding is idiomatic; most languages need a nested block, which would disturb
 the bytes. The cross-file cases are language-independent and no byte-level
 scheme catches them.
 
-This is an accepted limitation, not an oversight: the compiler is the backstop,
-and paying an index round trip per handle to catch what `cargo check` catches
-would be a bad trade. What follows from it:
+Positional recovery, by contrast, *is* handled — in two different ways
+depending on who moved the bytes. Our own edits carry a delta, so `rebase`
+shifts entries arithmetically. An external change gives no delta at all, so the
+referent is found again by **identity**: same kind, same qualified name, and
+only when the match is unique. Locals correctly fall through to `gone` — they
+have no qualified name, and three `x`s in a function are distinguishable only
+by position, which is exactly what was lost.
+
+Whichever path runs, the **anchor moves with the range**. It is the offset
+questions are posed at, it lives inside the range, and leaving it behind aims
+the next question at whatever now occupies that byte.
+
+The semantic gap above is an accepted limitation, not an oversight: the
+compiler is the backstop, and paying an index round trip per handle to catch
+what `cargo check` catches would be a bad trade. What follows from it:
 
 - `edit` guards **textual** premises. Semantic premises are the caller's to
   declare, via deps — and even deps only catch *modification* of nodes named,
@@ -180,6 +192,13 @@ Two rules that decide most error-handling questions:
 **Reads may auto-recover; writes never may.** Resolving a stale handle to
 current content costs a label on a read. Doing the same on an edit is a silent
 clobber — "whatever is there now" is not what was asked for.
+
+**Retry through a race; refuse a conflict.** These look similar and are not.
+A language server answering `ContentModified` has not disagreed with us — its
+state was moving while it answered, and the same request succeeds moments
+later, so retrying is correct. A stale handle *is* a disagreement and must
+never be retried into. Any external write opens the first kind of window,
+because we announce the change and then immediately ask about it.
 
 **Refuse rather than truncate.** Half a function usually still parses, so
 truncated source invites confident reasoning about code that does not exist —

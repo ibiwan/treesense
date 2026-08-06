@@ -15,6 +15,8 @@ Concurrency safety is maintained through version stamping; editing a handle with
 
 Tuple, internal-only to the facade.  Holds appropriate subset of: full system path to the file, line number[s], byte range, generation tag, type of node, name of symbol, qualified path if available, definition path otherwise.
 
+Also carries an **anchor** byte offset: the point at which position-based questions about this referent are posed.  Distinct from the byte range because a declaration's range starts at its doc comment, and asking a language server about a comment answers nothing.  The anchor must move with the range whenever a handle is rebased or relocated.
+
 ### Handle
 
 Opaque reference, a # prefixed alphanumeric token. Conceptually, refers to a symbol/node/block/range as it was at the time it was generated.  Generation tag is implicit, writes to a handle will succeed only as long as the referent hasn't changed.  If the referent has MOVED without changing (because of adding text earlier in the file) it will still be valid.
@@ -82,7 +84,7 @@ Language-specific fully qualified symbol, e.g. `Widget::count`
 | REFS | |
 | -- | -- |
 | **arguments** | |
-| Handle \| Position \| Symbolic |  |
+| Handle \| Position \| Symbolic | Symbolic is **not yet implemented** — needs `workspace/symbol`. |
 | **returns** | (if...) |
 | Hits | handle points to one token |
 | | handle points to a named declaration block |
@@ -92,7 +94,21 @@ Language-specific fully qualified symbol, e.g. `Widget::count`
 | | position include multiple symbols |
 | | symbolic ref matches multiple places (reentrant impls, e.g.) |
 
-If multiple distinct symbols match, "ambiguous" will be the first line of the response, then the list will be the first hit found per candidate symbol, matching the formatting of Hits. Refs can be called again with one of those handles which should then be unambiguous.
+Ambiguity is a result, not an error, and the response is shaped for **one-call recovery** rather than completeness — it is not a Hits list.
+
+```
+ambiguous: 3 symbols on src/pipeline.rs:9 — call refs again with one of these handles
+  pub fn run(seed: u32) -> u32 {
+#1 :9 run  declares fn run
+#2 :9 seed  in fn run
+```
+
+- First line states the count, where, and what to do next.
+- One line per candidate: Handle, Range, name, and either the declaration it names or the item containing it.
+- The queried source line appears once when every candidate shares it, rather than repeated per entry.
+- Declarations sort first — asked about a line, the caller usually means the thing declared there — but nothing is auto-picked.
+- Candidate handles point at the **declaration** where the identifier names one, since only a declaration carries a qualified name and so only it survives relocation.
+- Entries are **occurrences, not distinct spellings**.  Two `x`s may be two bindings; collapsing them by text drops exactly the choice this response exists to offer.  A symbol that genuinely repeats costs one redundant line, which is the cheap direction to be wrong in.
 
 | EDIT | |
 | -- | -- |

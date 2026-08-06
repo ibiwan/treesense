@@ -59,6 +59,14 @@ export interface Full {
   generation: Generation;
   /** Digest of the referent's bytes. Survives position shifts; breaks on edits. */
   digest: string;
+  /**
+   * Byte offset to pose position-based questions at.
+   *
+   * Distinct from `bytes.start` because a declaration's span begins at its doc
+   * comment, and asking a language server about a comment answers nothing. For
+   * a declaration this is its name token; for anything else it is the start.
+   */
+  anchor: number;
   kind: NodeKind;
   /** Unqualified symbol name, when the node names something. */
   symbol: string | null;

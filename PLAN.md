@@ -18,15 +18,14 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | `read` (handle and position), density guard, single-line floor |
 | ✅ | **M1** syntax layer — offset conversion, ast-grep binding |
 | ✅ | **M2** `refs` — first verb that mints handles |
-| 🚧 | **M3** handle lifecycle under mutation |
-| ⬜ | **M4** `edit` |
+| ✅ | **M3** handle lifecycle under mutation |
+| 🚧 | **M4** `edit` |
 | ⬜ | **M5** `find` |
 | ⬜ | **M6** `trace` |
 | ⬜ | **M7** use it against a real workload and measure |
 
-Handles are minted by `refs` as of M2. Still unexercised: **rebasing**, and the
-`changed:` / `gone` resolution paths — nothing mutates a file yet, which is
-what M3 is for.
+Still unexercised: **`rebase`** itself — the arithmetic path for our own edits.
+M4 is what drives it.
 
 ## M1 — syntax layer
 
@@ -70,9 +69,17 @@ Note the first handles now exist, so M3 is finally reachable.
 
 ## M3 — handle lifecycle
 
-No new features. Mint a handle, then mutate the file three ways and assert the
-outcome: insert above it (→ `ok`, rebased), change it (→ `changed:`), delete it
-(→ `gone`). Retires the largest block of untested code in the project.
+**Done.** Six cases, all mutating the disposable copy: unchanged, moved,
+altered, deleted, rewritten-identically, and unknown.
+
+It needed one feature after all. `rebase` only runs from our own edits, which
+carry a delta; an *external* change gives none, so a moved referent was read
+back at a stale byte range. Relocation by identity fills that in — same kind,
+same qualified name, and only when the match is unique. Locals correctly fall
+through to `gone`: they have no qualified name, and three `x`s in a function
+are distinguishable only by position, which is exactly what was lost.
+
+Handles are minted by `refs` as of M2, and exercised under mutation as of M3.
 
 ## M4 — `edit`
 
@@ -174,6 +181,18 @@ The registry realpaths every file, so a root still containing a symlink
 (`/tmp`, or any `mkdtemp` path on darwin) makes the two halves disagree about
 the same file: we ask about `/private/var/...` while it indexed `/var/...`, and
 it answers `file not found` for a file plainly on disk.
+
+**`line_comment` nodes absorb their trailing newline; `attribute_item` does
+not.** So a blank line between a module header and a doc comment appears as a
+single newline in the gap, and any "at most one newline" contiguity rule reads
+a detached header as attached — making every item handle in a documented file
+span the top of the file. Compare against whether the previous node's own range
+already ends in a newline.
+
+**A file change we announce opens a `ContentModified` window.** We notify
+rust-analyzer of every disk change we observe and may query before its state
+settles, which answers `-32801`. Any external write can open it — an editor
+saving, a `git checkout`, another agent — so LSP requests retry through it.
 
 **Unix socket paths cap near 104 bytes** (`sun_path`). Exceeding it does not
 reliably raise — the daemon can listen successfully and be unreachable.

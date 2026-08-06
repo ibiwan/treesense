@@ -260,6 +260,8 @@ export interface SyntaxTree {
   enclosingItem(node: SyntaxNode): SyntaxNode | null;
   /** Byte range of an item including its attached docs. */
   itemRangeWithDocs(node: SyntaxNode): ByteRange;
+  /** Every declaration in the file, for identity-based relocation. */
+  items(): SyntaxNode[];
 }
 
 class Tree implements SyntaxTree {
@@ -306,6 +308,19 @@ class Tree implements SyntaxTree {
       .map((a) => new Node(a, this));
   }
 
+  items(): SyntaxNode[] {
+    const out: SyntaxNode[] = [];
+    const walk = (sg: SgNode): void => {
+      const kind = normaliseKind(this.language, String(sg.kind()));
+      if (isItemKind(kind)) out.push(new Node(sg, this));
+      // Declarations nest — a fn inside an impl, a mod inside a mod — so keep
+      // descending rather than stopping at the first hit.
+      for (const child of sg.children()) walk(child);
+    };
+    walk(this.root);
+    return out;
+  }
+
   enclosingItem(node: SyntaxNode): SyntaxNode | null {
     if (isItemKind(node.kind)) return node;
     for (const a of this.ancestors(node)) {
@@ -320,11 +335,14 @@ class Tree implements SyntaxTree {
 
     for (let prev = sg.prev(); prev !== null; prev = prev.prev()) {
       if (!DOC_KINDS.has(String(prev.kind()))) break;
-      const prevEnd = this.offsets.toBytes(prev.range().end.index);
-      // Contiguous means nothing but whitespace between them; a blank line
-      // separates a comment from the item and it stops belonging to it.
-      if (!onlyWhitespaceBetween(this.content, prevEnd, start)) break;
-      start = this.offsets.toBytes(prev.range().start.index);
+      const prevRange = {
+        start: this.offsets.toBytes(prev.range().start.index),
+        end: this.offsets.toBytes(prev.range().end.index),
+      };
+      // A blank line separates a comment from the item, and it stops
+      // belonging to it — a module header is not a function's doc comment.
+      if (!attachedTo(this.content, prevRange, start)) break;
+      start = prevRange.start;
     }
 
     return { start, end: node.bytes.end };
@@ -337,14 +355,27 @@ export function parse(content: Buffer, lang: Language): SyntaxTree {
   return new Tree(lang, content, new OffsetMap(content), root);
 }
 
-/** At most one newline: a blank line detaches a comment from what follows. */
-function onlyWhitespaceBetween(content: Buffer, from: number, to: number): boolean {
+/**
+ * Is `prev` attached to what follows it, or separated by a blank line?
+ *
+ * The subtlety: a `line_comment` node's range **includes its own trailing
+ * newline**, while an `attribute_item`'s does not. So the gap after a comment
+ * already starts on the next line, and a single newline in it means a blank
+ * line — whereas after an attribute that same single newline is just the line
+ * break. Counting newlines without accounting for that treats a detached
+ * module header as attached, and every item handle in a documented file ends
+ * up spanning the top of the file.
+ */
+function attachedTo(content: Buffer, prev: ByteRange, start: number): boolean {
+  const absorbsNewline = content[prev.end - 1] === 0x0a;
+  const allowed = absorbsNewline ? 0 : 1;
+
   let newlines = 0;
-  for (let i = from; i < to; i++) {
+  for (let i = prev.end; i < start; i++) {
     const ch = content[i]!;
     if (ch === 0x0a) {
       newlines += 1;
-      if (newlines > 1) return false;
+      if (newlines > allowed) return false;
       continue;
     }
     if (ch !== 0x20 && ch !== 0x09 && ch !== 0x0d) return false;

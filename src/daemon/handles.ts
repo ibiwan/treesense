@@ -35,6 +35,23 @@ export class HandleTable {
 
   constructor(private readonly files: FileRegistry) {}
 
+  /**
+   * Find where a referent moved to after a change we did not make.
+   *
+   * Our own edits carry a delta, so `rebase` shifts entries arithmetically.
+   * An external write gives us no delta at all — the recorded byte range is
+   * simply wrong, and reading it back yields whatever now occupies those
+   * bytes. Matching on *identity* instead (same kind, same qualified name)
+   * relocates the referent when it is still uniquely recognisable, and
+   * declines when it is not, which is the honest answer.
+   *
+   * Set by whoever owns both the table and the syntax layer; the table itself
+   * stays free of any parser dependency.
+   */
+  relocator:
+    | ((entry: Full, content: Buffer) => { bytes: ByteRange; anchor: number } | null)
+    | null = null;
+
   private mint(): Handle {
     // Monotonic, base-32, never reused for the life of the daemon.
     let n = ++this.counter;
@@ -76,31 +93,47 @@ export class HandleTable {
       return { status: "ok", full: entry };
     }
 
-    // Generation moved. If it moved because of our own edit the entry was
-    // already rebased, so its range is current; verifying the digest tells us
-    // whether the referent itself was touched.
-    if (entry.bytes.end > snap.content.length) {
-      return { status: "gone", was: entry };
+    // Generation moved. If our own edit caused it the entry was already
+    // rebased, so the recorded range is current and the digest settles whether
+    // the referent itself was touched.
+    if (entry.bytes.end <= snap.content.length) {
+      const inPlace = digest(snap.content, entry.bytes);
+      if (inPlace === entry.digest) {
+        const refreshed: Full = { ...entry, generation: snap.generation };
+        this.entries.set(handle, refreshed);
+        return { status: "ok", full: refreshed };
+      }
     }
 
-    const current = digest(snap.content, entry.bytes);
-    if (current === entry.digest) {
-      const refreshed: Full = { ...entry, generation: snap.generation };
-      this.entries.set(handle, refreshed);
-      return { status: "ok", full: refreshed };
-    }
+    // Otherwise the range is stale. Try to find the referent by identity.
+    const moved = this.relocator?.(entry, snap.content) ?? null;
+    if (moved === null) return { status: "gone", was: entry };
 
-    // TODO(relocate): an external write we did not observe leaves us unable to
-    // compute a delta. For now the referent is reported as changed at its
-    // recorded range; re-deriving it from `symbol`/`kind` via the syntax layer
-    // would let us hand back an accurate replacement handle instead.
-    const moved: Full = {
+    const movedDigest = digest(snap.content, moved.bytes);
+    const relocated: Full = {
       ...entry,
+      bytes: moved.bytes,
+      // The anchor must move with the referent. Spreading the old entry and
+      // overriding only the range leaves it pointing into the pre-move file,
+      // so the next question about this handle is asked at whatever now
+      // occupies that offset.
+      anchor: moved.anchor,
+      lines: snap.index.linesForBytes(moved.bytes),
       generation: snap.generation,
-      digest: current,
-      lines: snap.index.linesForBytes(entry.bytes),
+      digest: movedDigest,
     };
-    const replacement = this.issue(stripHandle(moved));
+
+    // Moved but byte-identical: the caller's premise still holds, so this is
+    // not a conflict and the handle survives. Rejecting here would mean a
+    // sequence of edits above a referent never converges.
+    if (movedDigest === entry.digest) {
+      this.entries.set(handle, relocated);
+      return { status: "ok", full: relocated };
+    }
+
+    // Moved *and* altered. A read may have this, clearly marked; a write must
+    // not, because "whatever is there now" is not what was asked for.
+    const replacement = this.issue(stripHandle(relocated));
     return { status: "changed", full: replacement };
   }
 
@@ -133,6 +166,11 @@ export class HandleTable {
           ...entry,
           generation,
           bytes: { start: entry.bytes.start + delta, end: entry.bytes.end + delta },
+          // The anchor lives inside the range and shifts with it. Leaving it
+          // behind points the next question at whatever now occupies that
+          // offset, which is the same class of silent misresolution the
+          // generation check exists to prevent.
+          anchor: entry.anchor + delta,
         });
         shifted.push(handle);
         continue;

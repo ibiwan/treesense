@@ -91,4 +91,29 @@ describe("refs against a real workspace", { skip }, () => {
     assert.ok(forced.ok, forced.text);
     assert.ok(forced.text.length > 4000, "the override must actually return it");
   });
+
+  test("a position range honours its end, not just its start", async () => {
+    // `src/main.rs:12-13` is the shadowing pair. Looking only at line 12 would
+    // report a single symbol and answer confidently about the wrong thing.
+    const one = await fx.rpc({ op: "refs", target: "src/main.rs:12" });
+    const both = await fx.rpc({ op: "refs", target: "src/main.rs:12-13" });
+    assert.ok(both.ok, both.text);
+    assert.match(both.text, /^ambiguous:/, both.text);
+
+    const count = (t: string) => (t.match(/^#\w+ /gm) ?? []).length;
+    assert.ok(
+      count(both.text) > count(one.text),
+      `the range must see more than its first line:\n${both.text}`,
+    );
+  });
+
+  test("same-spelled symbols are not collapsed into one candidate", async () => {
+    // `let raw = 7;` then `let raw = raw + 1;` — two distinct bindings that
+    // happen to share a spelling. Deduping by text would drop the choice this
+    // response exists to offer.
+    const res = await fx.rpc({ op: "refs", target: "src/main.rs:12-13" });
+    assert.ok(res.ok, res.text);
+    const raws = (res.text.match(/^#\w+ :\d+ raw\b/gm) ?? []).length;
+    assert.ok(raws >= 2, `expected several raw candidates, got ${raws}:\n${res.text}`);
+  });
 });

@@ -40,6 +40,9 @@ import type {
   ServerCapabilities,
 } from "vscode-languageserver-protocol";
 
+/** LSP `ContentModified`: the server's state moved while it was answering. */
+const CONTENT_MODIFIED = -32801;
+
 export type Readiness = "starting" | "indexing" | "ready" | "failed";
 
 export interface LspOptions {
@@ -186,22 +189,47 @@ export class RustAnalyzer {
 
   async references(uri: string, position: Position): Promise<Location[]> {
     await this.whenReady();
-    const res = await this.require().sendRequest("textDocument/references", {
-      textDocument: { uri },
-      position,
-      context: { includeDeclaration: false },
-    });
+    const res = await this.settled(() =>
+      this.require().sendRequest("textDocument/references", {
+        textDocument: { uri },
+        position,
+        context: { includeDeclaration: false },
+      }),
+    );
     return (res as Location[] | null) ?? [];
   }
 
   async definition(uri: string, position: Position): Promise<Location[]> {
     await this.whenReady();
-    const res = await this.require().sendRequest("textDocument/definition", {
-      textDocument: { uri },
-      position,
-    });
+    const res = await this.settled(() =>
+      this.require().sendRequest("textDocument/definition", {
+        textDocument: { uri },
+        position,
+      }),
+    );
     if (res === null || res === undefined) return [];
     return Array.isArray(res) ? (res as Location[]) : [res as Location];
+  }
+
+  /**
+   * Retry through `ContentModified`.
+   *
+   * We announce every disk change we observe, and the server answers -32801
+   * while its own state is still settling. That is a race any external write
+   * can open — an editor saving, a `git checkout`, another agent — not a test
+   * artefact, and the failure is a hard error on a request that would have
+   * succeeded a moment later. Waiting is free here; being wrong is not.
+   */
+  private async settled<T>(send: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await send();
+      } catch (cause) {
+        const code = (cause as { code?: number }).code;
+        if (code !== CONTENT_MODIFIED || attempt >= 4) throw cause;
+        await new Promise((res) => setTimeout(res, 50 * (attempt + 1)));
+      }
+    }
   }
 
   /**

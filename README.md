@@ -43,12 +43,18 @@ columns.
 
 ## Status
 
-Working: address parsing, file registry with generations and lazy staleness,
-the handle table including rebasing across edits, response rendering, the
-rust-analyzer client, and `read`.
+Working: `read` and `refs`; addresses; the file registry with generations and
+lazy staleness; the handle table including rebasing, identity-based relocation
+and the `changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the
+ast-grep syntax layer; the rust-analyzer client.
 
-Stubbed with design notes in place: `find`, `refs`, `edit`, `trace`, and the
-ast-grep binding in `syntax.ts`.
+Stubbed with design notes in place: `find`, `edit`, `trace`. Symbolic
+addresses (`Widget::count`) are accepted by the grammar but not yet resolved.
+
+`npm test` is hermetic and fast; `npm run test:lsp` needs rust-analyzer and
+runs against a disposable copy of `fixtures/rust-workspace`. See
+[PLAN.md](PLAN.md) for milestones and [DESIGN.md](DESIGN.md) for the
+cross-cutting invariants.
 
 ## Develop
 
