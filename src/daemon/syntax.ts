@@ -262,6 +262,15 @@ export interface SyntaxTree {
   itemRangeWithDocs(node: SyntaxNode): ByteRange;
   /** Every declaration in the file, for identity-based relocation. */
   items(): SyntaxNode[];
+  /**
+   * Did the parse hit anything it could not make sense of?
+   *
+   * ast-grep exposes no `hasError()`, but a failed parse leaves `ERROR` nodes
+   * in the tree. Checking before a write costs microseconds and stops an
+   * unbalanced brace reaching disk, where it resurfaces later as confusing
+   * name-resolution failures rather than as the syntax error it actually is.
+   */
+  hasParseError(): boolean;
 }
 
 class Tree implements SyntaxTree {
@@ -319,6 +328,14 @@ class Tree implements SyntaxTree {
     };
     walk(this.root);
     return out;
+  }
+
+  hasParseError(): boolean {
+    const walk = (sg: SgNode): boolean => {
+      if (String(sg.kind()) === "ERROR") return true;
+      return sg.children().some(walk);
+    };
+    return walk(this.root);
   }
 
   enclosingItem(node: SyntaxNode): SyntaxNode | null {

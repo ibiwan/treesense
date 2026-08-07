@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
-import { hasRustAnalyzer, startFixture } from "../testkit/index.js";
+import { skipReason, startFixture } from "../testkit/index.js";
 
-const skip = hasRustAnalyzer() ? false : "rust-analyzer is not on PATH";
+const skip = skipReason();
 
 describe("refs against a real workspace", { skip }, () => {
   let fx: Awaited<ReturnType<typeof startFixture>>;

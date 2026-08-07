@@ -119,7 +119,18 @@ ambiguous: 3 symbols on src/pipeline.rs:9 — call refs again with one of these 
 | Replacement Content | Starts after first newline. No content for Delete |
 | **returns** |  |
 | Handle Plus | new reference to introduced content (enclosing node if  Delete) |
+| Invalidated | `invalidated #A #B` — outstanding handles that overlapped the edit and are now void. Omitted when none died. |
 | Error | With description, instead of handle, if target or dependency handles are unrecoverably stale. |
+
+Validation completes before anything is written: a rejected edit has touched no file.  Rejection names each failing dependency and *how* it failed, because the next move differs — `CHANGED` means re-read and retry, `GONE` means the node the plan depended on is deleted and the plan itself needs revisiting.
+
+Indentation comes from the buffer, never the payload: the replacement is dedented to its own minimum and re-indented to the target's base indent, so flush-left and pre-indented content give the same result.
+
+A replacement that fails to parse is refused and nothing is written — unless the file was *already* unparseable, which would otherwise trap the caller in a state only an edit can escape.
+
+`delete` takes the leading indentation and trailing newline with the node, and collapses a double blank line when the removed item was blank-separated on both sides.
+
+A Position target is rejected by the action with a readable message rather than by schema, since "no positions for safety" is a documented behaviour and not a syntax error.
 
 | TRACE | *NAIVE* trace of a single value up or down through its call chain |
 | -- | -- |

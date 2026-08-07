@@ -9,19 +9,27 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync } from "node:fs";
 import { cp, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
-import { connect, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import type { Reply, Request } from "../shared/protocol.js";
+import type { Reply, RequestInput } from "../shared/protocol.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** dist/testkit -> repo root */
 const repoRoot = join(here, "..", "..");
 export const FIXTURE = join(repoRoot, "fixtures", "rust-workspace");
+
+/**
+ * Where test sockets live. Overridable because `tmpdir()` is not always
+ * writable, and some sandboxes refuse `AF_UNIX` bind outright with EPERM —
+ * in which case point this at a directory inside the workspace.
+ */
+const SOCKET_DIR = process.env.FLUENT_SOCKET_DIR ?? tmpdir();
 
 /** LSP tests need the real binary; skip rather than fail when it is absent. */
 export function hasRustAnalyzer(): boolean {
@@ -33,10 +41,45 @@ export function hasRustAnalyzer(): boolean {
   }
 }
 
+/**
+ * Can we actually bind a unix socket here?
+ *
+ * Sandboxes commonly deny this with EPERM, and a suite that dies on the first
+ * `before` hook reports seven mysterious failures rather than one clear
+ * reason. Probe once and skip with an explanation instead.
+ */
+export function canBindSocket(): boolean {
+  const probe = join(SOCKET_DIR, `fl-probe-${process.pid}.sock`);
+  try {
+    mkdirSync(SOCKET_DIR, { recursive: true });
+    const server = createServer();
+    server.listen(probe);
+    server.close();
+    rmSync(probe, { force: true });
+    return true;
+  } catch {
+    rmSync(probe, { force: true });
+    return false;
+  }
+}
+
+/**
+ * One reason string for the whole integration suite, or `false` to run it.
+ * Every prerequisite that can be missing gets named here rather than
+ * presenting as a failure somewhere inside a hook.
+ */
+export function skipReason(): string | false {
+  if (!hasRustAnalyzer()) return "rust-analyzer is not on PATH";
+  if (!canBindSocket()) {
+    return `cannot bind a unix socket in ${SOCKET_DIR} — set FLUENT_SOCKET_DIR to a writable path`;
+  }
+  return false;
+}
+
 export interface Harness {
   /** Root of the disposable copy. Mutate anything under here. */
   root: string;
-  rpc(request: Request): Promise<Reply>;
+  rpc(request: RequestInput): Promise<Reply>;
   /** Overwrite a file inside the copy, relative to its root. */
   write(relative: string, content: string): Promise<void>;
   read(relative: string): Promise<string>;
@@ -58,7 +101,7 @@ export async function startFixture(): Promise<Running> {
 
   // Short socket path on purpose: sun_path caps near 104 bytes and a long
   // tmpdir plus a long name silently produces a daemon that never binds.
-  const socket = join(tmpdir(), `fl-${process.pid}-${counter++}.sock`);
+  const socket = join(SOCKET_DIR, `fl-${process.pid}-${counter++}.sock`);
 
   const daemon = spawn(process.execPath, [join(repoRoot, "dist", "daemon", "index.js"), root], {
     env: { ...process.env, FLUENT_SOCKET: socket },
@@ -81,12 +124,32 @@ export async function startFixture(): Promise<Running> {
     pending.delete(res.id);
   });
 
-  const rpc = (request: Request): Promise<Reply> =>
-    new Promise((resolve) => {
+  /**
+   * Every request is bounded. Without a timeout a single wedged call hangs the
+   * whole suite with no output — the failure mode is indistinguishable from a
+   * slow index, and the cause is invisible.
+   */
+  const rpc = (request: RequestInput): Promise<Reply> =>
+    new Promise((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`timed out: ${JSON.stringify(request)}\n${log.join("")}`));
+      }, 20_000);
+      pending.set(id, (reply) => {
+        clearTimeout(timer);
+        resolve(reply);
+      });
       conn.write(`${JSON.stringify({ id, request })}\n`);
     });
+
+  // A dead daemon must fail outstanding calls rather than leave them pending.
+  conn.once("close", () => {
+    for (const [id, waiter] of pending) {
+      pending.delete(id);
+      waiter({ ok: false, text: `daemon connection closed\n${log.join("")}` });
+    }
+  });
 
   // Queries that need name resolution block on the index; wait once here so
   // individual tests do not each pay for discovering that.
@@ -136,7 +199,7 @@ async function waitForSocket(path: string, daemon: ChildProcess, log: string[]):
   throw new Error(`daemon never listened on ${path}:\n${log.join("")}`);
 }
 
-async function waitForIndex(rpc: (r: Request) => Promise<Reply>, log: string[]): Promise<void> {
+async function waitForIndex(rpc: (r: RequestInput) => Promise<Reply>, log: string[]): Promise<void> {
   for (let i = 0; i < 300; i++) {
     const status = await rpc({ op: "status" });
     if (status.text.includes("index ready")) return;

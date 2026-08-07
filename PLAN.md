@@ -19,13 +19,14 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | **M1** syntax layer — offset conversion, ast-grep binding |
 | ✅ | **M2** `refs` — first verb that mints handles |
 | ✅ | **M3** handle lifecycle under mutation |
-| 🚧 | **M4** `edit` |
-| ⬜ | **M5** `find` |
+| ✅ | **M4** `edit` |
+| 🚧 | **M5** `find` |
 | ⬜ | **M6** `trace` |
 | ⬜ | **M7** use it against a real workload and measure |
 
-Still unexercised: **`rebase`** itself — the arithmetic path for our own edits.
-M4 is what drives it.
+`rebase` is exercised as of M4. Still unexercised: the multi-file coherence
+check (the workspace generation is maintained but nothing consumes it yet) —
+`trace` in M6 is what needs it.
 
 ## M1 — syntax layer
 
@@ -188,6 +189,13 @@ single newline in the gap, and any "at most one newline" contiguity rule reads
 a detached header as attached — making every item handle in a documented file
 span the top of the file. Compare against whether the previous node's own range
 already ends in a newline.
+
+**A schema-invalid request still has an id, and is still owed a reply.**
+Validating the whole envelope at once loses the id along with the bad body, and
+the daemon dropped the request silently — the caller then waited forever.
+Recover the id first, validate the body second. The same rule applies to the
+test harness: every request needs a timeout, or one wedged call hangs the suite
+with no output at all.
 
 **A file change we announce opens a `ContentModified` window.** We notify
 rust-analyzer of every disk change we observe and may query before its state

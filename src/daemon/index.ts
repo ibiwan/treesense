@@ -16,7 +16,7 @@ import { rmSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
-import { Envelope, type Reply, type Request } from "../shared/protocol.js";
+import { Outer, Request, type Reply } from "../shared/protocol.js";
 import { socketPathFor } from "../shared/socket.js";
 import { edit } from "./actions/edit.js";
 import { find } from "./actions/find.js";
@@ -46,28 +46,41 @@ async function dispatch(ws: Workspace, request: Request): Promise<Reply> {
   }
 }
 
+/** Zod errors are verbose; the first issue is the useful part. */
+function describe(cause: unknown): string {
+  const issues = (cause as { issues?: Array<{ path: unknown[]; message: string }> }).issues;
+  if (issues !== undefined && issues.length > 0) {
+    const first = issues[0]!;
+    const where = first.path.length > 0 ? `${first.path.join(".")}: ` : "";
+    return `${where}${first.message}`;
+  }
+  return (cause as Error).message;
+}
+
 function handle(ws: Workspace, socket: Socket): void {
   const lines = createInterface({ input: socket });
   lines.on("line", (line) => {
     void (async () => {
-      // Parse the envelope first and separately: without an id there is
-      // nothing to correlate a failure to, so a malformed request would
-      // otherwise strand the caller waiting forever.
-      let envelope: Envelope;
-      try {
-        envelope = Envelope.parse(JSON.parse(line));
-      } catch (cause) {
-        process.stderr.write(`dropping unparseable request: ${String(cause)}\n`);
-        return;
-      }
-
+      // The id is recovered separately from the request body, because a
+      // request that fails *schema* validation still has an id — and a reply
+      // is owed. Dropping it silently strands the caller forever, which is a
+      // far worse failure than a rejected request.
+      let id: number | null = null;
       let reply: Reply;
       try {
-        reply = await dispatch(ws, envelope.request);
+        const outer = Outer.parse(JSON.parse(line));
+        id = outer.id;
+        reply = await dispatch(ws, Request.parse(outer.request));
       } catch (cause) {
-        reply = { ok: false, text: `error: ${(cause as Error).message}` };
+        reply = { ok: false, text: `error: ${describe(cause)}` };
       }
-      socket.write(`${JSON.stringify({ id: envelope.id, ...reply })}\n`);
+
+      if (id === null) {
+        // No id at all: nobody is waiting on a correlation we cannot make.
+        process.stderr.write(`dropping unaddressable request: ${reply.text}\n`);
+        return;
+      }
+      socket.write(`${JSON.stringify({ id, ...reply })}\n`);
     })();
   });
 }

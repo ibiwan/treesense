@@ -37,9 +37,11 @@ export const RefsRequest = z.object({
 
 export const EditRequest = z.object({
   op: z.literal("edit"),
-  /** Handles only. A position carries no generation and no digest, so a
-   *  position-targeted write is unchecked by construction. */
-  target: z.string().regex(/^#/),
+  /**
+   * Handles only — but enforced in the action, not here, so the caller gets
+   * "edit takes a handle, not src/x.rs:10" rather than a regex complaint.
+   */
+  target: z.string().min(1),
   action: z.enum(["replace", "insert-before", "insert-after", "delete"]),
   /**
    * Handles the edit's correctness depends on but does not itself modify.
@@ -71,6 +73,13 @@ export const Request = z.discriminatedUnion("op", [
   StatusRequest,
 ]);
 export type Request = z.infer<typeof Request>;
+/**
+ * The shape a *client* sends: fields with defaults are optional here and
+ * required on `Request`, which is the post-parse view. Typing a caller with
+ * the output type forces it to spell out defaults the wire format exists to
+ * supply.
+ */
+export type RequestInput = z.input<typeof Request>;
 
 /**
  * Requests carry a correlation id, and responses echo it.
@@ -87,6 +96,18 @@ export const Envelope = z.object({
   request: Request,
 });
 export type Envelope = z.infer<typeof Envelope>;
+
+/**
+ * The id, recovered without validating the body.
+ *
+ * A request that fails schema validation is still owed a reply — it has an id
+ * and something is waiting on it. Validating the whole envelope at once means
+ * a bad body loses the id along with it, and the caller hangs.
+ */
+export const Outer = z.object({
+  id: z.number().int().nonnegative(),
+  request: z.unknown(),
+});
 
 /**
  * `text` is rendered on the daemon side and passed through the facade
