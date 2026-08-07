@@ -66,9 +66,24 @@ Language-specific fully qualified symbol, e.g. `Widget::count`
 | **arguments** | |
 | Needle    | Double-Quoted string to search for |
 | Haystack  | Location Reference (handle \| position) |
-| Mode      | Not Implemented Yet: One of string, text, symbol, or ast-grep query. Inferred, by default. |
+| Mode      | Inferred from the needle's shape; no parameter. A `$VAR` metavariable means an ast-grep pattern, anything else is literal text. Explicit modes remain unimplemented. |
 | **returns** |  |
+| Header | `find "<needle>" text\|pattern <count>` — the reading used is stated, so a misread costs one line rather than a round trip. A trailing `+` means the cap was hit. |
 | Hits | All Hits |
+
+Hit handles point at the **matched node**, not the enclosing line, so a
+follow-up `refs` on one is exact rather than ambiguous.
+
+Haystack scoping: absent searches the workspace (pruning `target/`,
+`node_modules/`, `.git/` and friends as it descends); a Position narrows to a
+file or a line range; a Handle bounds the search to that node's byte range.
+
+Zero matches is a successful answer, not an error — "nothing matches" is
+information. Results are capped; the cap is reported rather than silently
+applied.
+
+Unlike REFS, FIND needs no index. It reads files and parses them, so it works
+during cold start.
 
 | READ | |
 | -- | -- |
@@ -118,11 +133,11 @@ ambiguous: 3 symbols on src/pipeline.rs:9 — call refs again with one of these 
 | Dependency Handles | Write should fail if any handle listed is stale, use for cross-reference assumptions
 | Replacement Content | Starts after first newline. No content for Delete |
 | **returns** |  |
-| Handle Plus | new reference to introduced content (enclosing node if  Delete) |
+| Handle Plus | the item introduced by the edit — not the doc comment or attribute it may begin with, and not whatever merely moved into place. Enclosing node for Delete. |
 | Invalidated | `invalidated #A #B` — outstanding handles that overlapped the edit and are now void. Omitted when none died. |
 | Error | With description, instead of handle, if target or dependency handles are unrecoverably stale. |
 
-Validation completes before anything is written: a rejected edit has touched no file.  Rejection names each failing dependency and *how* it failed, because the next move differs — `CHANGED` means re-read and retry, `GONE` means the node the plan depended on is deleted and the plan itself needs revisiting.
+Validation completes before anything is written, and every participating file's generation is re-checked immediately before the rename — a file that moved in between aborts the edit rather than being written against a state the caller never saw.  A rejected edit has touched no file.  Rejection names each failing dependency and *how* it failed, because the next move differs — `CHANGED` means re-read and retry, `GONE` means the node the plan depended on is deleted and the plan itself needs revisiting.
 
 Indentation comes from the buffer, never the payload: the replacement is dedented to its own minimum and re-indented to the target's base indent, so flush-left and pre-indented content give the same result.
 

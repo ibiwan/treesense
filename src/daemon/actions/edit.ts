@@ -26,10 +26,10 @@ import { rename, stat, writeFile } from "node:fs/promises";
 import { parseAddress } from "../../shared/address.js";
 import { handlePlus } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
-import type { ByteRange, EditAction, Full, Handle } from "../../shared/types.js";
+import type { ByteRange, EditAction, FilePath, Full, Handle } from "../../shared/types.js";
 import { baseIndent, reindent } from "../indent.js";
-import { locate, mint } from "../locate.js";
-import { languageFor, parse } from "../syntax.js";
+import { locate, mint, type Located } from "../locate.js";
+import { languageFor, parse, type SyntaxNode } from "../syntax.js";
 import type { Workspace } from "../workspace.js";
 
 export interface EditArgs {
@@ -69,6 +69,11 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   const located = await locate(ws, target.full.file);
   const snap = located?.snap ?? (await ws.files.snapshot(target.full.file));
 
+  // Everything validated above was validated against *some* snapshot; the
+  // splice below is computed against *this* one. Record what each participant
+  // looked like now, so the same question can be asked again at commit time.
+  const witnessed = await witness(ws, target.full.file, deps);
+
   // ---- Phase 2: build and check --------------------------------------------
   const splice = build(snap.content, target.full, args);
   const next = Buffer.concat([
@@ -86,7 +91,22 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
     }
   }
 
-  // ---- Phase 3: write, then bump -------------------------------------------
+  // ---- Phase 3: re-verify, then write --------------------------------------
+  // Validation happened against a snapshot; the bytes below are about to be
+  // overwritten *now*. Between those two moments an editor may have saved, a
+  // checkout may have landed, or another agent may have written — and we
+  // cannot lock the working tree to prevent it. So ask again, immediately
+  // before committing, and abort rather than write against a world the caller
+  // never saw.
+  //
+  // The residual window is stat-to-rename, which POSIX gives no way to close:
+  // there is no compare-and-swap rename. It is microseconds wide, and the
+  // rename itself is atomic, so a reader still never sees a half-written file.
+  const drifted = await recheck(ws, witnessed);
+  if (drifted !== null) {
+    return fail(`${drifted} changed while the edit was being prepared; nothing written`);
+  }
+
   // Temp-and-rename gives per-file atomicity: a reader sees the old bytes or
   // the new ones, never half. Across files there is no equivalent without a
   // journal, which is why this verb takes a single target.
@@ -110,20 +130,10 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   );
 
   const fresh = await locate(ws, target.full.file);
-  // After a delete there is no introduced content, and the node now at that
-  // offset is whatever slid up into the gap — the *next* item, which is not
-  // what the caller asked about. Hand back the enclosing scope instead: it
-  // answers "where am I now" rather than "what moved".
-  const at = fresh === null ? null : fresh.tree.nodeAt(splice.range.start);
-  const introduced =
-    at === null || fresh === null
-      ? null
-      : args.action === "delete"
-        ? fresh.tree.enclosingItem(at)
-        : at;
+  const introduced = fresh === null ? null : outcome(fresh, splice.contentAt, args.action);
   const summary =
     fresh === null || introduced === null
-      ? `${target.full.file}:${snap.index.lineAt(splice.range.start)} ok`
+      ? `${target.full.file}:${snap.index.lineAt(splice.contentAt)} ok`
       : handlePlus(mint(ws, fresh, introduced), { withPath: true });
 
   const dead = killed.filter((handle) => handle !== address.handle);
@@ -136,30 +146,73 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   return { ok: true, text: lines.join("\n") };
 }
 
+/**
+ * The node worth handing back after a successful edit.
+ *
+ * Not simply `nodeAt(start)`, for two different reasons:
+ *
+ *   insert/replace — the text may begin with a doc comment or `#[attr]`, so
+ *                    the node literally at that offset is the prologue, not
+ *                    the declaration it introduces. Returning the comment
+ *                    makes the handle near-useless for the next read or edit.
+ *   delete         — nothing was introduced, and whatever now sits at that
+ *                    offset merely slid up into the gap. The enclosing scope
+ *                    answers "where am I now" instead.
+ */
+function outcome(
+  fresh: Located,
+  offset: number,
+  action: EditAction,
+): SyntaxNode | null {
+  const at = fresh.tree.nodeAt(offset);
+  if (at === null) return null;
+  if (action === "delete") return fresh.tree.enclosingItem(at);
+
+  const introduced = fresh.tree
+    .items()
+    .find((item) => fresh.tree.itemRangeWithDocs(item).start === offset);
+  return introduced ?? at;
+}
+
+interface Splice {
+  range: ByteRange;
+  text: string;
+  /** Where the caller's content actually begins, which is not always where
+   *  the splice does. Used only for reporting the outcome. */
+  contentAt: number;
+}
+
 /** What to splice and with what — computed before anything is written. */
 function build(
   content: Buffer,
   target: Full,
   args: EditArgs,
-): { range: ByteRange; text: string } {
+) : Splice {
   const indent = baseIndent(content, target.bytes.start) ?? "";
   const body = reindent(args.content, indent);
 
   switch (args.action) {
     case "replace":
-      return { range: target.bytes, text: body };
+      return { range: target.bytes, text: body, contentAt: target.bytes.start };
 
     case "insert-before":
       return {
         range: { start: target.bytes.start, end: target.bytes.start },
         text: `${body}\n${indent}`,
+        contentAt: target.bytes.start,
       };
 
-    case "insert-after":
+    case "insert-after": {
+      // The body is preceded by a newline and the indent, so it does not begin
+      // where the splice does — and reporting the splice offset lands between
+      // nodes, which resolves to the whole file.
+      const lead = Buffer.byteLength(`\n${indent}`, "utf8");
       return {
         range: { start: target.bytes.end, end: target.bytes.end },
         text: `\n${indent}${body}`,
+        contentAt: target.bytes.end + lead,
       };
+    }
 
     case "delete": {
       // Take the leading indentation and the trailing newline too, so removing
@@ -175,15 +228,45 @@ function build(
       const blankBefore = content[start - 1] === 0x0a && content[start - 2] === 0x0a;
       if (blankBefore && content[end] === 0x0a) end += 1;
 
-      return { range: { start, end }, text: "" };
+      return { range: { start, end }, text: "", contentAt: start };
     }
   }
+}
+
+/**
+ * Which files this edit's correctness rests on, and what generation each was
+ * at when it was checked. The target's own file is always included — it is the
+ * one being overwritten.
+ */
+async function witness(
+  ws: Workspace,
+  file: FilePath,
+  deps: DepVerdict[],
+): Promise<Map<FilePath, number>> {
+  const out = new Map<FilePath, number>();
+  out.set(file, (await ws.files.snapshot(file)).generation);
+  for (const dep of deps) {
+    if (dep.file === null || out.has(dep.file)) continue;
+    out.set(dep.file, (await ws.files.snapshot(dep.file)).generation);
+  }
+  return out;
+}
+
+/** The first file that moved since it was witnessed, or null if none did. */
+async function recheck(ws: Workspace, witnessed: Map<FilePath, number>): Promise<string | null> {
+  for (const [file, generation] of witnessed) {
+    const now = await ws.files.snapshot(file).catch(() => null);
+    if (now === null || now.generation !== generation) return file;
+  }
+  return null;
 }
 
 interface DepVerdict {
   handle: Handle;
   verdict: "ok" | "changed" | "gone" | "unknown";
   replacement: Handle | null;
+  /** Which file the dep lives in, so it can be re-checked at commit time. */
+  file: FilePath | null;
 }
 
 async function validateDeps(ws: Workspace, deps: string[]): Promise<DepVerdict[]> {
@@ -191,7 +274,7 @@ async function validateDeps(ws: Workspace, deps: string[]): Promise<DepVerdict[]
   for (const raw of deps) {
     const address = parseAddress(raw);
     if (address.form !== "handle") {
-      out.push({ handle: raw as Handle, verdict: "unknown", replacement: null });
+      out.push({ handle: raw as Handle, verdict: "unknown", replacement: null, file: null });
       continue;
     }
     const resolved = await ws.handles.resolve(address.handle);
@@ -199,6 +282,7 @@ async function validateDeps(ws: Workspace, deps: string[]): Promise<DepVerdict[]
       handle: address.handle,
       verdict: resolved.status === "ok" ? "ok" : resolved.status,
       replacement: resolved.status === "changed" ? resolved.full.handle : null,
+      file: resolved.status === "unknown" ? null : resolvedFile(resolved),
     });
   }
   return out;
@@ -222,6 +306,10 @@ function rejection(target: Handle, deps: DepVerdict[]): string {
     );
   }
   return lines.join("\n");
+}
+
+function resolvedFile(resolved: { status: string; full?: Full; was?: Full }): FilePath | null {
+  return resolved.full?.file ?? resolved.was?.file ?? null;
 }
 
 function fail(message: string): Reply {

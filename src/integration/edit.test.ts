@@ -156,4 +156,45 @@ describe("edit", { skip }, () => {
     // Never the following item — that is what merely moved.
     assert.doesNotMatch(res.text, /fn clamp/, res.text);
   });
+
+  test("the reply handle names the introduced item, not its prologue", async () => {
+    // Inserted text beginning with a doc comment and an attribute: the node
+    // literally at the splice offset is the comment, and returning that makes
+    // the handle near-useless for the next read or edit.
+    const handle = await scaleHandle();
+    const res = await fx.rpc({
+      op: "edit",
+      target: handle,
+      action: "insert-after",
+      content: "/// Doubles a värde.\n#[inline]\npub fn doubled(value: u32) -> u32 {\n    scale(value, 2)\n}",
+    });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /fn doubled/, `reply should name the item:\n${res.text}`);
+
+    // And it must be usable: reading it back gives the whole declaration,
+    // doc comment included.
+    const reply = res.text.match(/^(#\w+)/)?.[1];
+    assert.ok(reply, res.text);
+    const read = await fx.rpc({ op: "read", target: reply });
+    assert.ok(read.ok, read.text);
+    assert.match(read.text, /pub fn doubled/, read.text);
+    assert.match(read.text, /Doubles a värde/, "the doc comment belongs to the item");
+  });
+
+  test("the reply handle is exact enough to feed back into refs", async () => {
+    const handle = await scaleHandle();
+    const res = await fx.rpc({
+      op: "edit",
+      target: handle,
+      action: "replace",
+      content: "#[inline]\npub fn scale(value: u32, factor: u32) -> u32 {\n    value.saturating_mul(factor)\n}",
+    });
+    assert.ok(res.ok, res.text);
+    const reply = res.text.match(/^(#\w+)/)?.[1];
+    assert.ok(reply, res.text);
+
+    const back = await fx.rpc({ op: "refs", target: reply });
+    assert.ok(back.ok, back.text);
+    assert.doesNotMatch(back.text, /^ambiguous/, `should resolve to scale:\n${back.text}`);
+  });
 });

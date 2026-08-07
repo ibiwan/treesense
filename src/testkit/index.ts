@@ -162,7 +162,11 @@ export async function startFixture(): Promise<Running> {
     read: (relative) => readFile(join(root, relative), "utf8"),
     async stop() {
       conn.destroy();
-      daemon.kill();
+      // Wait for it to actually die. Returning early leaves the daemon — and
+      // the rust-analyzer it owns — still running while the next suite starts,
+      // so fixtures pile up and compete for the machine. That presents as an
+      // intermittent timeout somewhere unrelated.
+      await endProcess(daemon);
       spawned.delete(daemon);
       await rm(root, { recursive: true, force: true });
       await rm(socket, { force: true });
@@ -217,6 +221,17 @@ function tryConnect(path: string): Promise<Socket | null> {
     sock.once("connect", () => resolve(sock));
     sock.once("error", () => resolve(null));
   });
+}
+
+/** SIGTERM, then SIGKILL if it will not go. Resolves once it is gone. */
+async function endProcess(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  child.kill();
+  const forced = delay(3000).then(() => {
+    child.kill("SIGKILL");
+  });
+  await Promise.race([exited, forced.then(() => exited)]);
 }
 
 function delay(ms: number): Promise<void> {

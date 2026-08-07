@@ -263,6 +263,12 @@ export interface SyntaxTree {
   /** Every declaration in the file, for identity-based relocation. */
   items(): SyntaxNode[];
   /**
+   * Structural search. `$A`-style metavariables match any node, so
+   * `$A.unwrap()` finds every unwrap regardless of receiver — which a text
+   * search cannot express and a regex expresses badly.
+   */
+  search(pattern: string): SyntaxNode[];
+  /**
    * Did the parse hit anything it could not make sense of?
    *
    * ast-grep exposes no `hasError()`, but a failed parse leaves `ERROR` nodes
@@ -328,6 +334,10 @@ class Tree implements SyntaxTree {
     };
     walk(this.root);
     return out;
+  }
+
+  search(pattern: string): SyntaxNode[] {
+    return this.root.findAll(pattern).map((m) => new Node(m, this));
   }
 
   hasParseError(): boolean {

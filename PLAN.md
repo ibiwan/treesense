@@ -20,8 +20,8 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | **M2** `refs` — first verb that mints handles |
 | ✅ | **M3** handle lifecycle under mutation |
 | ✅ | **M4** `edit` |
-| 🚧 | **M5** `find` |
-| ⬜ | **M6** `trace` |
+| ✅ | **M5** `find` |
+| 🚧 | **M6** `trace` |
 | ⬜ | **M7** use it against a real workload and measure |
 
 `rebase` is exercised as of M4. Still unexercised: the multi-file coherence
@@ -98,9 +98,13 @@ rebase rather than die; and a rejection where a dep changed underneath.
 
 ## M5 — `find`
 
-Shape dispatch on the needle, ast-grep patterns, hierarchy-grouped hits. Hit
-handles point at the *matched token*, not the enclosing line — that is what
-makes a follow-up `refs` exact rather than ambiguous.
+**Done.** Shape dispatch on the needle, ast-grep patterns, hierarchy-grouped
+hits, and scoping by file, line range or handle.
+
+The pattern engine earns its place immediately: `scale($A, $B)` matches
+`scale(raw, 3)` and `scale(seed + 1, step)` together — no literal or simple
+regex does — while correctly *not* matching `pub fn scale(value: u32, …)`,
+because a signature is not a call.
 
 ## M6 — `trace`
 
@@ -189,6 +193,14 @@ single newline in the gap, and any "at most one newline" contiguity rule reads
 a detached header as attached — making every item handle in a documented file
 span the top of the file. Compare against whether the previous node's own range
 already ends in a newline.
+
+**Validate-then-write is not enough on its own; the window has to be closed
+at both ends.** Validating against one snapshot and splicing against another
+lets a write land on bytes nobody checked — and `handles.resolve()` takes its
+own snapshot internally, so the two can diverge even with no external writer.
+Witness every participating file's generation at validation time and re-check
+it immediately before the rename. The residual stat-to-rename window cannot be
+closed: POSIX has no compare-and-swap rename.
 
 **A schema-invalid request still has an id, and is still owed a reply.**
 Validating the whole envelope at once loses the id along with the bad body, and

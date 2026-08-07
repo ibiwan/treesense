@@ -39,3 +39,11 @@ trivia adjustment.
   chosen handle; `move` should not guess at prologue ownership.
 - Return a new handle for the inserted text at the destination.
 - Add corner-case behavior only when real usage proves it important.
+
+# Transport fallback
+If Unix-domain sockets keep failing in constrained environments, a TCP
+localhost transport is a plausible durable fallback.
+
+- Not urgent if the issue only appears in sandboxed CI/dev environments.
+- Worth building if socket bind failures recur often enough to block testing or
+  dogfooding.
