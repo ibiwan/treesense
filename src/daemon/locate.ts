@@ -6,7 +6,7 @@
  * what handle should the caller be given for each.
  */
 
-import type { Full, FilePath, LineRange, NodeKind } from "../shared/types.js";
+import type { ByteRange, Full, FilePath, LineRange, NodeKind } from "../shared/types.js";
 import { digest, type FileSnapshot } from "./files.js";
 import { isItemKind, languageFor, parse, type SyntaxNode, type SyntaxTree } from "./syntax.js";
 import type { Workspace } from "./workspace.js";
@@ -69,6 +69,28 @@ export function mint(ws: Workspace, located: Located, node: SyntaxNode): Full {
     kind: node.kind,
     symbol: node.name ?? (node.kind === "ident" ? node.text() : null),
     qualified: qualifiedName(tree, node),
+    definition: null,
+  });
+}
+
+/**
+ * Mint a handle for a raw byte range, with no node behind it.
+ *
+ * For files no grammar covers. `read` already falls back to literal lines for
+ * these; a text search has to be able to point into one too, or half the
+ * verbs disagree about which files exist.
+ */
+export function mintRange(ws: Workspace, snap: FileSnapshot, bytes: ByteRange): Full {
+  return ws.handles.issue({
+    file: snap.path,
+    bytes,
+    lines: snap.index.linesForBytes(bytes),
+    generation: snap.generation,
+    digest: digest(snap.content, bytes),
+    anchor: bytes.start,
+    kind: "range",
+    symbol: null,
+    qualified: null,
     definition: null,
   });
 }

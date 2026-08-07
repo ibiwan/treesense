@@ -84,4 +84,35 @@ describe("find", { skip }, () => {
     assert.ok(res.ok, res.text);
     assert.match(res.text, /värde/, "non-ASCII needles must round-trip");
   });
+
+  test("literal search works in files no grammar covers", async () => {
+    // The fixture carries a .md and a .toml precisely for this path. `read`
+    // already falls back to literal lines for them; a text search that cannot
+    // look at them contradicts "find string in file" being a basic capability.
+    const md = await fx.rpc({ op: "find", needle: "load-bearing", haystack: "README.md" });
+    assert.ok(md.ok, md.text);
+    assert.match(md.text, / text [1-9]/, `should have found it:\n${md.text}`);
+
+    const toml = await fx.rpc({ op: "find", needle: "width", haystack: "config.toml:1-5" });
+    assert.ok(toml.ok, toml.text);
+    assert.match(toml.text, /width = 320/, `a line range needs no grammar:\n${toml.text}`);
+  });
+
+  test("a grammarless hit still carries a usable handle", async () => {
+    const res = await fx.rpc({ op: "find", needle: "load-bearing", haystack: "README.md" });
+    const handle = res.text.match(/> (#\w+) /)?.[1];
+    assert.ok(handle, res.text);
+
+    const read = await fx.rpc({ op: "read", target: handle });
+    assert.ok(read.ok, read.text);
+    assert.match(read.text, /load-bearing/, read.text);
+  });
+
+  test("a malformed pattern is an error, not zero results", async () => {
+    // Zero matches is meaningful information here, so a broken query must not
+    // be able to impersonate one.
+    const res = await fx.rpc({ op: "find", needle: "fn $A( { ) $B" });
+    assert.equal(res.ok, false, `malformed patterns must not read as empty:\n${res.text}`);
+    assert.match(res.text, /pattern is not valid/, res.text);
+  });
 });

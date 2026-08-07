@@ -170,6 +170,8 @@ export interface SyntaxNode {
    */
   readonly nameNode: SyntaxNode | null;
   readonly parent: SyntaxNode | null;
+  /** Named children, in source order. Needed to locate an argument by position. */
+  children(): SyntaxNode[];
   /** Identifier nodes directly beneath this one, innermost occurrences first. */
   identifiers(): SyntaxNode[];
   text(): string;
@@ -213,6 +215,13 @@ class Node implements SyntaxNode {
       }
     }
     return null;
+  }
+
+  children(): SyntaxNode[] {
+    return this.sg
+      .children()
+      .filter((c) => c.isNamed())
+      .map((c) => new Node(c, this.tree));
   }
 
   identifiers(): SyntaxNode[] {
@@ -374,6 +383,25 @@ class Tree implements SyntaxTree {
 
     return { start, end: node.bytes.end };
   }
+}
+
+/**
+ * Is this pattern well-formed for the language?
+ *
+ * `findAll` does not throw on a malformed pattern — it builds one containing
+ * ERROR nodes and quietly matches nothing, which is indistinguishable from a
+ * genuine empty result. Since zero matches is meaningful information here, the
+ * pattern has to be checked rather than assumed.
+ *
+ * Metavariables are substituted first: `$A` is not valid source in any of
+ * these grammars, and `$$$` stands for zero or more nodes, so it drops out.
+ */
+export function patternParses(pattern: string, lang: Language): boolean {
+  const probe = pattern
+    .replace(/\$\$\$[A-Za-z_][A-Za-z_0-9]*|\$\$\$/g, "")
+    .replace(/\$([A-Za-z_][A-Za-z_0-9]*)/g, "zz_$1");
+  if (probe.trim().length === 0) return false;
+  return !parse(Buffer.from(probe, "utf8"), lang).hasParseError();
 }
 
 export function parse(content: Buffer, lang: Language): SyntaxTree {

@@ -181,8 +181,13 @@ export class FileRegistry {
       offsets: new OffsetMap(content),
     };
     this.tracked.set(path, next);
-    this.workspaceGeneration += 1;
-    this.onChange?.(path);
+    // Learning about a file for the first time is not the world moving — it is
+    // us catching up. Counting it would make any multi-file collection report
+    // itself stale simply for having read more than one file.
+    if (prior !== undefined) {
+      this.workspaceGeneration += 1;
+      this.onChange?.(path);
+    }
     return {
       path,
       generation: next.generation,
@@ -205,6 +210,7 @@ export class FileRegistry {
       offsets: new OffsetMap(content),
     };
     this.tracked.set(path, next);
+    // A write we performed is always a change, first sight of the file or not.
     this.workspaceGeneration += 1;
     this.onChange?.(path);
     return next.generation;

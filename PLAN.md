@@ -21,12 +21,12 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | **M3** handle lifecycle under mutation |
 | ✅ | **M4** `edit` |
 | ✅ | **M5** `find` |
-| 🚧 | **M6** `trace` |
-| ⬜ | **M7** use it against a real workload and measure |
+| ✅ | **M6** `trace` |
+| 🚧 | **M7** use it against a real workload and measure |
 
-`rebase` is exercised as of M4. Still unexercised: the multi-file coherence
-check (the workspace generation is maintained but nothing consumes it yet) —
-`trace` in M6 is what needs it.
+All five verbs are implemented and exercised. What remains untested is the
+premise itself: M7 measures whether this actually costs fewer tokens than
+`grep` and `cat`, which no amount of unit testing can establish.
 
 ## M1 — syntax layer
 
@@ -111,8 +111,10 @@ because a signature is not a call.
 Breadth-first with a visited set keyed by (file, byte range). Every terminated
 branch carries a stop reason.
 
-**Verified by:** tracing a real value in tauroid and confirming terminated
-branches report `macro` / `non-ident-arg` / `depth` rather than simply ending.
+**Done**, naive as designed. Against the fixture, tracing `scaled` down finds
+the `macro` stop at `println!`, the `non-ident-arg` stop at
+`scale(seed + 1, step)`, and a genuine cross-crate hop into `helper`'s `value`
+parameter — every feature the fixture was built to exercise.
 
 ## M7 — use it
 
@@ -193,6 +195,17 @@ single newline in the gap, and any "at most one newline" contiguity rule reads
 a detached header as attached — making every item handle in a documented file
 span the top of the file. Compare against whether the previous node's own range
 already ends in a newline.
+
+**A malformed structural pattern does not throw.** ast-grep builds a pattern
+containing ERROR nodes and matches nothing, which is indistinguishable from a
+genuine empty result — fatal when zero matches is meaningful. Validate by
+substituting metavariables (`$A` is not valid source; `$$$` drops out) and
+parsing the probe.
+
+**First sight of a file is not a change.** The workspace generation bumped on
+every initial snapshot, so any multi-file collection declared itself stale
+purely for having read more than one file — the coherence signal fired on
+success. Count a change only when a *tracked* file's content moves.
 
 **Validate-then-write is not enough on its own; the window has to be closed
 at both ends.** Validating against one snapshot and splicing against another

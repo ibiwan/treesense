@@ -35,17 +35,31 @@ const PRUNE = new Set([
 export interface WalkLimits {
   /** Stop after this many candidates. A search is not an inventory. */
   maxFiles?: number;
+  /**
+   * Restrict to files a grammar covers. Structural patterns need one by
+   * definition; a literal text search does not, and refusing to look at a
+   * README because nothing can parse it is not a defensible answer.
+   */
+  grammarsOnly?: boolean;
 }
 
-export async function walkSource(
-  root: string,
-  limits: WalkLimits = {},
-): Promise<FilePath[]> {
+export interface Walked {
+  files: FilePath[];
+  /** The cap was reached, so the list is incomplete — and must be reported. */
+  truncated: boolean;
+}
+
+export async function walkSource(root: string, limits: WalkLimits = {}): Promise<Walked> {
   const max = limits.maxFiles ?? 5000;
+  const grammarsOnly = limits.grammarsOnly ?? true;
   const out: FilePath[] = [];
+  let truncated = false;
 
   const descend = async (dir: string): Promise<void> => {
-    if (out.length >= max) return;
+    if (out.length >= max) {
+      truncated = true;
+      return;
+    }
 
     let entries;
     try {
@@ -56,7 +70,10 @@ export async function walkSource(
     }
 
     for (const entry of entries) {
-      if (out.length >= max) return;
+      if (out.length >= max) {
+        truncated = true;
+        return;
+      }
       if (entry.name.startsWith(".") && entry.name !== ".") {
         if (PRUNE.has(entry.name)) continue;
       }
@@ -67,12 +84,20 @@ export async function walkSource(
         await descend(path);
         continue;
       }
-      if (entry.isFile() && languageFor(path) !== null) {
-        out.push(path as FilePath);
-      }
+      if (!entry.isFile()) continue;
+      if (grammarsOnly && languageFor(path) === null) continue;
+      out.push(path as FilePath);
     }
   };
 
   await descend(root);
-  return out;
+  return { files: out, truncated };
+}
+
+/**
+ * A NUL byte in the first few KB is the standard, cheap binary test. Text
+ * search must not spew an object file into the response.
+ */
+export function looksBinary(content: Buffer): boolean {
+  return content.subarray(0, 8192).includes(0);
 }

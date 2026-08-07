@@ -16,9 +16,9 @@ import { formatLineRange, parseAddress } from "../../shared/address.js";
 import { renderHits } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
 import type { FilePath, Full, Hit } from "../../shared/types.js";
-import { locate, mint, type Located } from "../locate.js";
-import { isItemKind } from "../syntax.js";
-import { walkSource } from "../walk.js";
+import { locate, mint, mintRange, type Located } from "../locate.js";
+import { isItemKind, patternParses } from "../syntax.js";
+import { looksBinary, walkSource } from "../walk.js";
 import type { Workspace } from "../workspace.js";
 
 export interface FindArgs {
@@ -43,13 +43,17 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
   const needle = args.needle.trim();
   if (needle.length === 0) return { ok: false, text: "error: empty needle" };
 
-  const scope = await resolveScope(ws, args.haystack);
+  const structural = looksStructural(needle);
+  const scope = await resolveScope(ws, args.haystack, structural);
   if ("error" in scope) return { ok: false, text: `error: ${scope.error}` };
 
-  const structural = looksStructural(needle);
   const groups = new Map<string, Hit[]>();
   let total = 0;
   let truncated = false;
+  // A capped *walk* means files were never looked at, which is a different and
+  // more serious incompleteness than a capped hit list: the caller cannot tell
+  // from the results that anything was skipped.
+  let unwalked = scope.unwalked;
 
   for (const file of scope.files) {
     if (total >= MAX_HITS) {
@@ -58,14 +62,26 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
     }
 
     const located = await locate(ws, file);
-    if (located === null) continue;
 
-    const ranges = structural
+    // No grammar: a literal search still works on the bytes. A structural one
+    // cannot — a pattern is defined in terms of a grammar.
+    if (located === null) {
+      if (structural) continue;
+      const plain = await plainMatches(ws, file, needle, scope.within);
+      if (plain.length > 0) {
+        groups.set(file, plain);
+        total += plain.length;
+      }
+      continue;
+    }
+
+    const found = structural
       ? structuralMatches(located, needle)
       : textMatches(located, needle);
+    if (!Array.isArray(found)) return { ok: false, text: `error: ${found.error}` };
 
     const hits: Hit[] = [];
-    for (const offset of ranges) {
+    for (const offset of found) {
       if (scope.within !== null && (offset < scope.within.start || offset >= scope.within.end)) {
         continue;
       }
@@ -84,12 +100,15 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
   }
 
   const reading = structural ? "pattern" : "text";
-  const header = `find ${JSON.stringify(needle)} ${reading} ${total}${truncated ? "+" : ""}`;
-  if (total === 0) return { ok: true, text: header };
+  const header = `find ${JSON.stringify(needle)} ${reading} ${total}${truncated || unwalked ? "+" : ""}`;
 
-  const body = renderHits(groups);
-  const note = truncated ? `\n… capped at ${MAX_HITS}; narrow with haystack` : "";
-  return { ok: true, text: `${header}\n${body}${note}` };
+  const notes: string[] = [];
+  if (truncated) notes.push(`… capped at ${MAX_HITS} hits; narrow with haystack`);
+  if (unwalked) notes.push("… file limit reached; some files were never searched");
+  const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
+
+  if (total === 0) return { ok: true, text: `${header}${note}` };
+  return { ok: true, text: `${header}\n${renderHits(groups)}${note}` };
 }
 
 /** Byte offsets of literal occurrences. */
@@ -106,15 +125,64 @@ function textMatches(located: Located, needle: string): number[] {
   return out;
 }
 
-/** Byte offsets where a structural match begins. */
-function structuralMatches(located: Located, pattern: string): number[] {
+/**
+ * Byte offsets where a structural match begins, or the reason the pattern
+ * itself was unusable.
+ *
+ * Swallowing a bad pattern as "no matches" is the one thing this must not do:
+ * we teach callers that zero matches is meaningful information, so a malformed
+ * query returning the same shape as a real empty result is actively
+ * misleading. It is a user error, and it is reported as one.
+ */
+function structuralMatches(located: Located, pattern: string): number[] | { error: string } {
+  if (!patternParses(pattern, located.tree.language)) {
+    return {
+      error: `pattern is not valid ${located.tree.language}: ${JSON.stringify(pattern)}`,
+    };
+  }
   try {
     return located.tree.search(pattern).map((node) => node.bytes.start);
-  } catch {
-    // An unparseable pattern is a user error, not a crash; it yields nothing
-    // and the header still reports that it was read as a pattern.
-    return [];
+  } catch (cause) {
+    return { error: `pattern rejected: ${(cause as Error).message}` };
   }
+}
+
+/**
+ * Literal matches in a file no grammar covers.
+ *
+ * There is no hierarchy to report, so each hit carries a range handle — the
+ * same thing `read` hands back for these files, so the two verbs agree about
+ * what is addressable.
+ */
+async function plainMatches(
+  ws: Workspace,
+  file: FilePath,
+  needle: string,
+  within: { start: number; end: number } | null,
+): Promise<Hit[]> {
+  const snap = await ws.files.snapshot(file).catch(() => null);
+  if (snap === null || looksBinary(snap.content)) return [];
+
+  const pattern = Buffer.from(needle, "utf8");
+  const hits: Hit[] = [];
+  let from = 0;
+  for (;;) {
+    const at = snap.content.indexOf(pattern, from);
+    if (at === -1) break;
+    from = at + pattern.length;
+    if (within !== null && (at < within.start || at >= within.end)) continue;
+
+    const line = snap.index.lineAt(at);
+    const start = snap.index.startOfLine(line);
+    const end =
+      line >= snap.index.lineCount ? snap.content.length : snap.index.startOfLine(line + 1);
+
+    hits.push({
+      hierarchy: [mintRange(ws, snap, { start, end })],
+      snippet: snap.content.subarray(start, end).toString("utf8").trim(),
+    });
+  }
+  return hits;
 }
 
 /**
@@ -162,12 +230,24 @@ const INTERESTING = new Set([
 ]);
 
 type Scope =
-  | { files: FilePath[]; within: { start: number; end: number } | null }
+  | {
+      files: FilePath[];
+      within: { start: number; end: number } | null;
+      /** The walk hit its file cap, so some files were never candidates. */
+      unwalked: boolean;
+    }
   | { error: string };
 
-async function resolveScope(ws: Workspace, haystack: string | undefined): Promise<Scope> {
+async function resolveScope(
+  ws: Workspace,
+  haystack: string | undefined,
+  structural: boolean,
+): Promise<Scope> {
   if (haystack === undefined) {
-    return { files: await walkSource(ws.root), within: null };
+    // A structural search can only look at files a grammar covers; a literal
+    // one may look at anything that is not binary.
+    const walked = await walkSource(ws.root, { grammarsOnly: structural });
+    return { files: walked.files, within: null, unwalked: walked.truncated };
   }
 
   const address = parseAddress(haystack);
@@ -180,23 +260,25 @@ async function resolveScope(ws: Workspace, haystack: string | undefined): Promis
     return {
       files: [resolved.full.file],
       within: { start: resolved.full.bytes.start, end: resolved.full.bytes.end },
+      unwalked: false,
     };
   }
 
   if (address.form === "position") {
     const file = await ws.files.canonical(address.path);
-    if (address.lines === null) return { files: [file], within: null };
+    if (address.lines === null) return { files: [file], within: null, unwalked: false };
 
-    const located = await locate(ws, file);
-    if (located === null) {
-      return { error: `no grammar for ${address.path}${formatLineRange(address.lines)}` };
-    }
-    const start = located.snap.index.startOfLine(address.lines.start);
+    // Line bounds come from the snapshot, not the parse — a range in a file
+    // with no grammar is still a perfectly good range.
+    const snap = await ws.files.snapshot(file).catch(() => null);
+    if (snap === null) return { error: `${address.path} could not be read` };
+
+    const start = snap.index.startOfLine(address.lines.start);
     const end =
-      address.lines.end >= located.snap.index.lineCount
-        ? located.snap.content.length
-        : located.snap.index.startOfLine(address.lines.end + 1);
-    return { files: [file], within: { start, end } };
+      address.lines.end >= snap.index.lineCount
+        ? snap.content.length
+        : snap.index.startOfLine(address.lines.end + 1);
+    return { files: [file], within: { start, end }, unwalked: false };
   }
 
   return { error: `haystack must be a file or handle, not a symbol (${address.symbol})` };

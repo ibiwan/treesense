@@ -79,8 +79,18 @@ Haystack scoping: absent searches the workspace (pruning `target/`,
 file or a line range; a Handle bounds the search to that node's byte range.
 
 Zero matches is a successful answer, not an error — "nothing matches" is
-information. Results are capped; the cap is reported rather than silently
-applied.
+information. **A malformed pattern is therefore an error, not zero matches**:
+it must not be able to impersonate a real empty result.
+
+Text search works on any non-binary file, grammar or not — `find string in
+file` is a basic capability, and `read` already falls back to literal lines for
+these. A hit in such a file carries a range handle rather than a hierarchy, so
+both verbs agree about what is addressable. Structural patterns require a
+grammar by definition.
+
+Two caps, both reported rather than silently applied: hits, and files
+enumerated during a workspace walk. The second matters more — a capped hit list
+is visibly short, whereas unwalked files are invisible in the results.
 
 Unlike REFS, FIND needs no index. It reads files and parses them, so it works
 during cold start.
@@ -159,3 +169,11 @@ A Position target is rejected by the action with a readable message rather than 
 | Candidates | as REFS, if not unique |
 
 Naive trace follows the symbol to a named argument or parameter, looks for callers/callees, maps to variables at corresponding position.  No accommodation is made for slices, mutability, ownership, destructuring, etc.
+
+Only a **bare identifier** in argument position is followed.  Anything else is a terminus carrying a reason, because following it would require knowing what the surrounding expression does with the value — which is exactly the analysis this verb does not perform.
+
+Stop reasons: `end`, `macro`, `non-ident-arg`, `destructure`, `field-assign`, `return`, `depth`, `cycle`, `unresolved`.  A row without one is a waypoint with deeper rows beyond it; **a terminus always carries one**, so a branch that halted is never mistakable for a branch that finished.
+
+The header reports the walk's workspace generation and marks the result `STALE` if any file changed during it.  Unlike a reference list — where each entry stands or falls alone — a trace's conclusion depends on every link holding simultaneously, so coherence is checked across the whole walk rather than per lookup.
+
+An ambiguous Position is refused with a pointer to REFS rather than guessed at: a trace built on the wrong symbol is expensive to notice.
