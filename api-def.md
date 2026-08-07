@@ -3,7 +3,7 @@
 ## Basics
 Line numbers and text searches are supported, but are treated as fallbacks and starting points.  Direct node references are preferred, and are provided/recognized/translated by the MCP facade.
 
-Actions include "find string in file", "read source", "find references", "edit source", "trace flow".
+Actions include "find string in file", "read source", "find references", "edit source", "relocate source", "trace flow".
 
 Location references can take the form of opaque block handles, file and line number tuples, and logical (namespace-style) breadcrumb chains.
 
@@ -159,6 +159,25 @@ A replacement that fails to parse is refused and nothing is written — unless t
 `delete` takes the leading indentation and trailing newline with the node, and collapses a double blank line when the removed item was blank-separated on both sides.
 
 A Position target is rejected by the action with a readable message rather than by schema, since "no positions for safety" is a documented behaviour and not a syntax error.
+
+| MOVE | |
+| -- | -- |
+| **arguments** | |
+| Source Handle | No positions, same reason as EDIT |
+| Destination Handle | The anchor `Action` is relative to |
+| Action | Insert-Before, Insert-After — relative to Destination |
+| Dependency Handles | Same semantics as EDIT's |
+| **returns** |  |
+| Handle Plus | the relocated item at its new position |
+| Invalidated | as EDIT |
+| Error | With description, instead of handle, if source, destination, or a dependency is unrecoverably stale |
+| Partial | Cross-file only — see below |
+
+Same-file and cross-file are mechanically different, not just different in scope.
+
+**Same-file** is one atomic write: both the removal at the source and the insertion at the destination land in a single temp-and-rename, computed as two splices against one buffer. Reindentation at the destination works exactly like EDIT's `insert-before`/`insert-after`; the removal at the source gets EDIT's own blank-line and leading-indent cleanup. A destination that resolves to a point strictly inside the source is rejected — no coherent ordering exists. A destination exactly on either boundary of the source is a no-op: deleting and reinserting the same bytes immediately adjacent to where they already sit reconstructs the file exactly, so nothing is written at all.
+
+**Cross-file** cannot offer that same atomicity — there is no journal across two files, the same reason EDIT takes a single target. Cross-file matters more than the guarantee, so the destination is written *first*: worst case on a failure partway through is a visible duplicate, never a lost source. Validation happens once, up front, against both files together; the destination is rewitnessed and rechecked immediately before its own write; only after that write lands is the source rechecked. If the source or a dependency has gone stale by then, the move stops there and returns a **Partial** result: the new handle at the destination stands, and the failure is reported with the same CHANGED/GONE vocabulary as a dependency rejection — no automatic reversal is attempted, since undoing a completed write is itself a fresh write into a world that already moved once.
 
 | TRACE | *NAIVE* trace of a single value up or down through its call chain |
 | -- | -- |

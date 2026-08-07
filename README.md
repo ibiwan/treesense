@@ -34,6 +34,7 @@ Handles die when the daemon dies, not when a client disconnects.
 | `read`  | source, or a reason it can't be returned — never navigation |
 | `refs`  | references to a symbol; blocks on the index |
 | `edit`  | modify at a handle, guarded by the target and declared deps |
+| `move`  | relocate a handle's bytes before/after another handle, same-file or cross-file |
 | `trace` | naive value flow up/down the call chain |
 
 Addresses come in three forms: an opaque handle (`#317H`), a position
@@ -43,13 +44,17 @@ columns.
 
 ## Status
 
-Working: `read` and `refs`; addresses; the file registry with generations and
-lazy staleness; the handle table including rebasing, identity-based relocation
-and the `changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the
-ast-grep syntax layer; the rust-analyzer client.
+All six verbs are implemented: `read`, `refs`, `edit`, `find`, `move`, `trace`. Also
+in place: addresses; the file registry with generations and lazy staleness;
+the handle table including rebasing, identity-based relocation and the
+`changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the ast-grep syntax
+layer; the rust-analyzer client.
 
-Stubbed with design notes in place: `find`, `edit`, `trace`. Symbolic
-addresses (`Widget::count`) are accepted by the grammar but not yet resolved.
+Symbolic addresses (`Widget::count`) are accepted by the grammar but not yet
+resolved — they need `workspace/symbol`.
+
+What's left is M7: dogfooding against a real workload to measure whether this
+actually costs fewer tokens than `grep`/`cat`. See [PLAN.md](PLAN.md).
 
 `npm test` is hermetic and fast; `npm run test:lsp` needs rust-analyzer and
 runs against a disposable copy of `fixtures/rust-workspace`. See

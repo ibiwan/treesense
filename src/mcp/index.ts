@@ -5,7 +5,7 @@
  * Tool descriptions are deliberately terse: definitions sit in the model's
  * context on every single request, used or not, so a comprehensive surface is
  * a permanent tax paid against the exact metric this tool exists to improve.
- * Five verbs, short schemas, no `mode` or `scope` knobs.
+ * Six verbs, short schemas, no `mode` or `scope` knobs.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -81,6 +81,23 @@ async function main(): Promise<void> {
       },
     },
     async (args) => call({ op: "edit", ...args }),
+  );
+
+  server.registerTool(
+    "move",
+    {
+      description: "Relocate a handle's bytes to sit before or after another handle. Cross-file writes the destination first, so a failure partway through leaves a duplicate, never a loss.",
+      inputSchema: {
+        source: z.string().describe("handle only"),
+        destination: z.string().describe("handle only"),
+        action: z.enum(["insert-before", "insert-after"]),
+        deps: z
+          .array(z.string())
+          .default([])
+          .describe("handles this move's correctness depends on, same as edit's deps"),
+      },
+    },
+    async (args) => call({ op: "move", ...args }),
   );
 
   server.registerTool(

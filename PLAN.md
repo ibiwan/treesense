@@ -23,8 +23,9 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | **M5** `find` |
 | ✅ | **M6** `trace` |
 | 🚧 | **M7** use it against a real workload and measure |
+| ✅ | `move` — relocate a handle's bytes before/after another handle, same-file or cross-file (added post-M6, see REVIEW_NOTES.md) |
 
-All five verbs are implemented and exercised. What remains untested is the
+All six verbs are implemented and exercised. What remains untested is the
 premise itself: M7 measures whether this actually costs fewer tokens than
 `grep` and `cat`, which no amount of unit testing can establish.
 

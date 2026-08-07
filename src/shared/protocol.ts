@@ -54,6 +54,18 @@ export const EditRequest = z.object({
   content: z.string().default(""),
 });
 
+export const MoveRequest = z.object({
+  op: z.literal("move"),
+  /** Handles only, same reason as `edit`'s target: a position carries no
+   *  generation to check the write against. */
+  source: z.string().min(1),
+  destination: z.string().min(1),
+  action: z.enum(["insert-before", "insert-after"]),
+  /** Same semantics as `edit`'s deps: premises the move's correctness rests
+   *  on without the move itself touching them. */
+  deps: z.array(z.string().regex(/^#/)).default([]),
+});
+
 export const TraceRequest = z.object({
   op: z.literal("trace"),
   target: z.string().min(1),
@@ -69,6 +81,7 @@ export const Request = z.discriminatedUnion("op", [
   ReadRequest,
   RefsRequest,
   EditRequest,
+  MoveRequest,
   TraceRequest,
   StatusRequest,
 ]);

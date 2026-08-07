@@ -26,7 +26,8 @@ import { rename, stat, writeFile } from "node:fs/promises";
 import { parseAddress } from "../../shared/address.js";
 import { handlePlus } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
-import type { ByteRange, EditAction, FilePath, Full, Handle } from "../../shared/types.js";
+import type { ByteRange, EditAction, Full, Handle } from "../../shared/types.js";
+import { validateDeps, verdictLines, witness, recheck, type DepVerdict } from "../deps.js";
 import { baseIndent, reindent } from "../indent.js";
 import { locate, mint, type Located } from "../locate.js";
 import { languageFor, parse, type SyntaxNode } from "../syntax.js";
@@ -72,10 +73,10 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   // Everything validated above was validated against *some* snapshot; the
   // splice below is computed against *this* one. Record what each participant
   // looked like now, so the same question can be asked again at commit time.
-  const witnessed = await witness(ws, target.full.file, deps);
+  const witnessed = await witness(ws, [target.full.file], deps);
 
   // ---- Phase 2: build and check --------------------------------------------
-  const splice = build(snap.content, target.full, args);
+  const splice = build(snap.content, target.full, args.action, args.content);
   const next = Buffer.concat([
     snap.content.subarray(0, splice.range.start),
     Buffer.from(splice.text, "utf8"),
@@ -159,7 +160,7 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
  *                    offset merely slid up into the gap. The enclosing scope
  *                    answers "where am I now" instead.
  */
-function outcome(
+export function outcome(
   fresh: Located,
   offset: number,
   action: EditAction,
@@ -174,7 +175,7 @@ function outcome(
   return introduced ?? at;
 }
 
-interface Splice {
+export interface Splice {
   range: ByteRange;
   text: string;
   /** Where the caller's content actually begins, which is not always where
@@ -182,16 +183,24 @@ interface Splice {
   contentAt: number;
 }
 
-/** What to splice and with what — computed before anything is written. */
-function build(
+/**
+ * What to splice and with what — computed before anything is written.
+ *
+ * Exported for MOVE, which builds an insert splice at the destination and a
+ * delete splice at the source from the exact same logic `edit` uses for its
+ * own actions — same indentation derivation, same blank-line cleanup on
+ * delete, no separate implementation to keep in sync.
+ */
+export function build(
   content: Buffer,
   target: Full,
-  args: EditArgs,
-) : Splice {
+  action: EditAction,
+  text: string,
+): Splice {
   const indent = baseIndent(content, target.bytes.start) ?? "";
-  const body = reindent(args.content, indent);
+  const body = reindent(text, indent);
 
-  switch (args.action) {
+  switch (action) {
     case "replace":
       return { range: target.bytes, text: body, contentAt: target.bytes.start };
 
@@ -234,61 +243,6 @@ function build(
 }
 
 /**
- * Which files this edit's correctness rests on, and what generation each was
- * at when it was checked. The target's own file is always included — it is the
- * one being overwritten.
- */
-async function witness(
-  ws: Workspace,
-  file: FilePath,
-  deps: DepVerdict[],
-): Promise<Map<FilePath, number>> {
-  const out = new Map<FilePath, number>();
-  out.set(file, (await ws.files.snapshot(file)).generation);
-  for (const dep of deps) {
-    if (dep.file === null || out.has(dep.file)) continue;
-    out.set(dep.file, (await ws.files.snapshot(dep.file)).generation);
-  }
-  return out;
-}
-
-/** The first file that moved since it was witnessed, or null if none did. */
-async function recheck(ws: Workspace, witnessed: Map<FilePath, number>): Promise<string | null> {
-  for (const [file, generation] of witnessed) {
-    const now = await ws.files.snapshot(file).catch(() => null);
-    if (now === null || now.generation !== generation) return file;
-  }
-  return null;
-}
-
-interface DepVerdict {
-  handle: Handle;
-  verdict: "ok" | "changed" | "gone" | "unknown";
-  replacement: Handle | null;
-  /** Which file the dep lives in, so it can be re-checked at commit time. */
-  file: FilePath | null;
-}
-
-async function validateDeps(ws: Workspace, deps: string[]): Promise<DepVerdict[]> {
-  const out: DepVerdict[] = [];
-  for (const raw of deps) {
-    const address = parseAddress(raw);
-    if (address.form !== "handle") {
-      out.push({ handle: raw as Handle, verdict: "unknown", replacement: null, file: null });
-      continue;
-    }
-    const resolved = await ws.handles.resolve(address.handle);
-    out.push({
-      handle: address.handle,
-      verdict: resolved.status === "ok" ? "ok" : resolved.status,
-      replacement: resolved.status === "changed" ? resolved.full.handle : null,
-      file: resolved.status === "unknown" ? null : resolvedFile(resolved),
-    });
-  }
-  return out;
-}
-
-/**
  * The dep outcomes are reported separately because the caller's next move
  * differs sharply: CHANGED means re-read and retry, GONE means the node the
  * plan depended on is deleted and the plan itself needs revisiting. Handed
@@ -296,20 +250,7 @@ async function validateDeps(ws: Workspace, deps: string[]): Promise<DepVerdict[]
  * longer exists.
  */
 function rejection(target: Handle, deps: DepVerdict[]): string {
-  const lines = ["edit rejected: premise changed", `${target} target ok`];
-  for (const dep of deps) {
-    if (dep.verdict === "ok") continue;
-    lines.push(
-      dep.verdict === "changed"
-        ? `${dep.handle} CHANGED  now ${dep.replacement} — re-read, then retry`
-        : `${dep.handle} ${dep.verdict.toUpperCase()} — re-plan`,
-    );
-  }
-  return lines.join("\n");
-}
-
-function resolvedFile(resolved: { status: string; full?: Full; was?: Full }): FilePath | null {
-  return resolved.full?.file ?? resolved.was?.file ?? null;
+  return ["edit rejected: premise changed", `${target} target ok`, ...verdictLines(deps)].join("\n");
 }
 
 function fail(message: string): Reply {

@@ -177,7 +177,7 @@ rather than presentation.
 - **No spatial inference.** Hierarchy is a `>` chain, not indentation: reading
   relative nesting is fine, counting depth is not.
 - **Tool descriptions are a permanent tax** — they sit in context on every
-  request, used or not. Five verbs, terse schemas, no `mode` or `scope` knobs.
+  request, used or not. Six verbs, terse schemas, no `mode` or `scope` knobs.
 
 Sizes are reported only when *surprising* (denser than ~80 bytes/line). On
 ordinary code the line count conveys magnitude already, so the field's presence
