@@ -60,8 +60,9 @@ export async function trace(ws: Workspace, args: TraceArgs): Promise<Reply> {
   const before = ws.files.workspaceGen;
 
   const sites: Site[] = [];
-  if (args.maxDown !== 0) await walk(ws, start, "down", args.maxDown, sites);
-  if (args.maxUp !== 0) await walk(ws, start, "up", args.maxUp, sites);
+  let capped = false;
+  if (args.maxDown !== 0) capped = (await walk(ws, start, "down", args.maxDown, sites)) || capped;
+  if (args.maxUp !== 0) capped = (await walk(ws, start, "up", args.maxUp, sites)) || capped;
 
   // A trace is an inference, not an enumeration: unlike a reference list, where
   // each entry stands or falls alone, its conclusion depends on every link
@@ -71,9 +72,14 @@ export async function trace(ws: Workspace, args: TraceArgs): Promise<Reply> {
   const after = ws.files.workspaceGen;
   const stale = before === after ? "" : " STALE — files changed mid-walk, re-run";
 
+  // A capacity stop is still a stop. Returning quietly at the budget would let
+  // a truncated walk read as a complete one — the exact failure this verb's
+  // stop reasons exist to prevent, arriving through the back door.
+  const cap = capped ? ` CAPPED at ${MAX_SITES} sites — narrow with maxDown/maxUp` : "";
+
   const header =
     `trace ${start.node.text()} up${args.maxUp} down${args.maxDown} ` +
-    `${sites.length} ws${after}${stale}`;
+    `${sites.length}${capped ? "+" : ""} ws${after}${stale}${cap}`;
 
   if (sites.length === 0) return { ok: true, text: `${header}\n(no flow found)` };
   return { ok: true, text: [header, ...sites.map(renderSite)].join("\n") };
@@ -85,7 +91,7 @@ async function walk(
   direction: "up" | "down",
   max: number,
   sites: Site[],
-): Promise<void> {
+): Promise<boolean> {
   const seen = new Set<string>([key(start)]);
   /** Where each visited location was reported, so a terminus updates its row. */
   const rows = new Map<string, number>();
@@ -94,12 +100,20 @@ async function walk(
   for (let distance = 1; frontier.length > 0; distance++) {
     if (max >= 0 && distance > max) {
       for (const item of frontier) sites.push(site(ws, item, direction, distance - 1, "depth"));
-      return;
+      return false;
     }
 
     const next: Frontier[] = [];
-    for (const item of frontier) {
-      if (sites.length >= MAX_SITES) return;
+    for (const [index, item] of frontier.entries()) {
+      if (sites.length >= MAX_SITES) {
+        // Mark what was left unexplored rather than dropping it. These rows
+        // push past the budget on purpose: an unexplained absence costs more
+        // than a handful of extra lines.
+        for (const abandoned of frontier.slice(index)) {
+          sites.push(site(ws, abandoned, direction, distance - 1, "capped"));
+        }
+        return true;
+      }
 
       const steps = direction === "down" ? await stepDown(ws, item) : await stepUp(ws, item);
       if (steps.length === 0) {
@@ -113,7 +127,10 @@ async function walk(
       }
 
       for (const step of steps) {
-        if (sites.length >= MAX_SITES) return;
+        if (sites.length >= MAX_SITES) {
+          sites.push(site(ws, item, direction, distance - 1, "capped"));
+          return true;
+        }
         if ("stop" in step) {
           sites.push(site(ws, step.at, direction, distance, step.stop));
           continue;
@@ -131,6 +148,7 @@ async function walk(
     }
     frontier = next;
   }
+  return false;
 }
 
 type Step = { to: Frontier } | { at: Frontier; stop: StopReason };

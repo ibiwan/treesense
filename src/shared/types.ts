@@ -102,6 +102,7 @@ export type StopReason =
   | "field-assign" // stored into a struct field
   | "return" // flows out via return value
   | "depth" // hit Max Up / Max Down
+  | "capped" // the walk ran out of budget — not an ending, a truncation
   | "cycle" // already visited
   | "unresolved"; // callee could not be resolved
 

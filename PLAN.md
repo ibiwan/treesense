@@ -196,6 +196,17 @@ a detached header as attached — making every item handle in a documented file
 span the top of the file. Compare against whether the previous node's own range
 already ends in a newline.
 
+**A cap enforced in one branch is not a cap.** `find` bounded hits in the
+parsed path and not in the grammarless one, so a text file with 500 matches
+reported an uncapped count with no marker. Sibling code paths need the same
+budget, and the same applies to `trace`: returning quietly at its site limit
+let a truncated walk read as a complete one — the exact failure its stop
+reasons exist to prevent, arriving through the back door.
+
+**Bounding results does not bound the response.** Sixty hits on a minified
+line is a quarter-megabyte of snippets. Caps on count and on excerpt length are
+different limits and both are needed.
+
 **A malformed structural pattern does not throw.** ast-grep builds a pattern
 containing ERROR nodes and matches nothing, which is indistinguishable from a
 genuine empty result — fatal when zero matches is meaningful. Validate by

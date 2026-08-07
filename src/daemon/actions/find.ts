@@ -30,6 +30,18 @@ export interface FindArgs {
 const MAX_HITS = 60;
 
 /**
+ * A hit shows *where* something is; it is not a substitute for reading it.
+ * Without this, sixty matches on a minified line return a quarter-megabyte of
+ * context nobody asked for — the hit cap alone does not bound the response.
+ */
+const MAX_SNIPPET = 200;
+
+function snippet(content: Buffer, start: number, end: number): string {
+  const text = content.subarray(start, end).toString("utf8").trim();
+  return text.length <= MAX_SNIPPET ? text : `${text.slice(0, MAX_SNIPPET)}…`;
+}
+
+/**
  * Shape dispatch, not a mode parameter. A metavariable is the one thing a
  * literal search can never contain, so its presence is unambiguous — and the
  * response states which reading was used, so a misread costs one line rather
@@ -67,11 +79,16 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
     // cannot — a pattern is defined in terms of a grammar.
     if (located === null) {
       if (structural) continue;
-      const plain = await plainMatches(ws, file, needle, scope.within);
-      if (plain.length > 0) {
-        groups.set(file, plain);
-        total += plain.length;
+      // Budgeted like the parsed path. A cap enforced in one branch and not
+      // its sibling is not a cap: a README with 500 matches would report an
+      // uncapped count with no marker, which is precisely what the contract
+      // promises never to do.
+      const plain = await plainMatches(ws, file, needle, scope.within, MAX_HITS - total);
+      if (plain.hits.length > 0) {
+        groups.set(file, plain.hits);
+        total += plain.hits.length;
       }
+      if (plain.truncated) truncated = true;
       continue;
     }
 
@@ -159,9 +176,10 @@ async function plainMatches(
   file: FilePath,
   needle: string,
   within: { start: number; end: number } | null,
-): Promise<Hit[]> {
+  budget: number,
+): Promise<{ hits: Hit[]; truncated: boolean }> {
   const snap = await ws.files.snapshot(file).catch(() => null);
-  if (snap === null || looksBinary(snap.content)) return [];
+  if (snap === null || looksBinary(snap.content)) return { hits: [], truncated: false };
 
   const pattern = Buffer.from(needle, "utf8");
   const hits: Hit[] = [];
@@ -171,6 +189,7 @@ async function plainMatches(
     if (at === -1) break;
     from = at + pattern.length;
     if (within !== null && (at < within.start || at >= within.end)) continue;
+    if (hits.length >= budget) return { hits, truncated: true };
 
     const line = snap.index.lineAt(at);
     const start = snap.index.startOfLine(line);
@@ -179,10 +198,10 @@ async function plainMatches(
 
     hits.push({
       hierarchy: [mintRange(ws, snap, { start, end })],
-      snippet: snap.content.subarray(start, end).toString("utf8").trim(),
+      snippet: snippet(snap.content, start, end),
     });
   }
-  return hits;
+  return { hits, truncated: false };
 }
 
 /**
@@ -210,10 +229,7 @@ function hitAt(ws: Workspace, located: Located, offset: number): Hit | null {
       ? located.snap.content.length
       : located.snap.index.startOfLine(line + 1);
 
-  return {
-    hierarchy: chain,
-    snippet: located.snap.content.subarray(start, end).toString("utf8").trim(),
-  };
+  return { hierarchy: chain, snippet: snippet(located.snap.content, start, end) };
 }
 
 const INTERESTING = new Set([

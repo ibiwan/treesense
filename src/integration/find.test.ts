@@ -115,4 +115,20 @@ describe("find", { skip }, () => {
     assert.equal(res.ok, false, `malformed patterns must not read as empty:\n${res.text}`);
     assert.match(res.text, /pattern is not valid/, res.text);
   });
+
+  test("the hit cap applies to grammarless files too", async () => {
+    // A cap enforced only in the parsed path is not a cap. dense.txt holds
+    // 4000 occurrences on one line, and is grammarless.
+    const res = await fx.rpc({ op: "find", needle: "x", haystack: "dense.txt" });
+    assert.ok(res.ok, res.text);
+
+    const count = Number(res.text.match(/ text (\d+)/)?.[1]);
+    assert.ok(Number.isFinite(count), res.text);
+    assert.ok(count <= 60, `cap must hold on this path too, got ${count}`);
+    assert.match(res.text, /text \d+\+/, `truncation must be marked:\n${res.text.split("\n")[0]}`);
+    assert.match(res.text, /capped at 60 hits/, res.text);
+    // And the hit cap alone does not bound the response: each snippet is a
+    // 4000-byte line, so snippets must be capped independently.
+    assert.ok(res.text.length < 20_000, `response should stay readable: ${res.text.length}B`);
+  });
 });
