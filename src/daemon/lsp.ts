@@ -45,6 +45,26 @@ const CONTENT_MODIFIED = -32801;
 
 export type Readiness = "starting" | "indexing" | "ready" | "failed";
 
+/** The most useful current LSP work item for an agent deciding what to do next. */
+export interface IndexStatus {
+  readiness: Readiness;
+  phase?: string;
+  message?: string;
+  percentage?: number;
+}
+
+/** The location-bearing subset shared by LSP workspace-symbol response forms. */
+export interface WorkspaceSymbol {
+  name: string;
+  location: Location;
+}
+
+interface Progress {
+  phase: string;
+  message?: string;
+  percentage?: number;
+}
+
 export interface LspOptions {
   /** Workspace root. Must be canonical. */
   root: string;
@@ -58,12 +78,28 @@ export class RustAnalyzer {
   private conn: MessageConnection | null = null;
   private capabilities: ServerCapabilities | null = null;
   private state: Readiness = "starting";
+  private readonly progress = new Map<string | number, Progress>();
   private readyWaiters: Array<() => void> = [];
 
   constructor(private readonly opts: LspOptions) {}
 
   get readiness(): Readiness {
     return this.state;
+  }
+
+  /**
+   * A snapshot, not a completion signal. `ready` still comes exclusively from
+   * serverStatus/quiescent; progress work items can end while more work starts.
+   */
+  get indexStatus(): IndexStatus {
+    if (this.state === "ready" || this.state === "failed") return { readiness: this.state };
+
+    // rust-analyzer can report fetching and indexing concurrently. The actual
+    // indexing phase is the best scheduling hint for an agent, regardless of
+    // which notification happened most recently.
+    const current = [...this.progress.values()].find((item) => item.phase === "Indexing")
+      ?? this.progress.values().next().value;
+    return current === undefined ? { readiness: this.state } : { readiness: this.state, ...current };
   }
 
   /**
@@ -113,10 +149,36 @@ export class RustAnalyzer {
     // proc macros, then indexing — so the first `end` is emphatically not
     // "ready". Progress only ever moves us to `indexing` here; it is a
     // liveness signal, not a completion one.
-    conn.onNotification("$/progress", (params: { value?: { kind?: string } }) => {
-      const kind = params?.value?.kind;
+    conn.onNotification("$/progress", (params: {
+      token?: string | number;
+      value?: {
+        kind?: "begin" | "report" | "end";
+        title?: string;
+        message?: string;
+        percentage?: number;
+      };
+    }) => {
+      const { token, value } = params;
+      const kind = value?.kind;
+      if (token === undefined || value === undefined) return;
       if (kind === "begin" && this.state !== "ready") {
+        this.progress.set(token, {
+          phase: value.title ?? "Working",
+          ...(value.message === undefined ? {} : { message: value.message }),
+          ...(value.percentage === undefined ? {} : { percentage: value.percentage }),
+        });
         this.transition("indexing", "progress begin");
+      } else if (kind === "report") {
+        const prior = this.progress.get(token);
+        if (prior !== undefined) {
+          this.progress.set(token, {
+            ...prior,
+            ...(value.message === undefined ? {} : { message: value.message }),
+            ...(value.percentage === undefined ? {} : { percentage: value.percentage }),
+          });
+        }
+      } else if (kind === "end") {
+        this.progress.delete(token);
       }
     });
 
@@ -127,6 +189,7 @@ export class RustAnalyzer {
       "experimental/serverStatus",
       (params: { quiescent?: boolean; health?: string }) => {
         if (params?.health === "error") {
+          this.progress.clear();
           this.transition("failed", "serverStatus health=error");
           return;
         }
@@ -212,6 +275,24 @@ export class RustAnalyzer {
   }
 
   /**
+   * Workspace symbol search is intentionally only a discovery primitive. The
+   * caller still checks its qualified name against parsed source before using
+   * a location as an address.
+   */
+  async workspaceSymbols(query: string): Promise<WorkspaceSymbol[]> {
+    await this.whenReady();
+    const res = await this.settled(() =>
+      this.require().sendRequest("workspace/symbol", { query }),
+    );
+    const symbols = (res as Array<{ name?: string; location?: Location }> | null) ?? [];
+    return symbols.flatMap((symbol) =>
+      symbol.name === undefined || symbol.location === undefined
+        ? []
+        : [{ name: symbol.name, location: symbol.location }],
+    );
+  }
+
+  /**
    * Retry through `ContentModified`.
    *
    * We announce every disk change we observe, and the server answers -32801
@@ -257,6 +338,7 @@ export class RustAnalyzer {
 
   private markReady(): void {
     if (this.state === "ready") return;
+    this.progress.clear();
     this.transition("ready", "quiescent");
     for (const wake of this.readyWaiters) wake();
     this.readyWaiters = [];

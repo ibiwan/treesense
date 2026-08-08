@@ -113,3 +113,40 @@ localhost transport is a plausible durable fallback.
 - Not urgent if the issue only appears in sandboxed CI/dev environments.
 - Worth building if socket bind failures recur often enough to block testing or
   dogfooding.
+
+# Dogfooding observations — Tauroid navigation
+
+Using the tool against Tauroid to trace the marine sprite lifecycle was
+materially more structured and less noisy than the usual `rg` + `cat`
+workflow. `find` surfaced compact, enclosing source units with handles, which
+made it straightforward to follow the cross-cutting path from prototype and
+world creation through SVG templating, sprite caching, animation, rendering,
+and eventual process-lifetime cleanup. Literal shell search remains faster for
+a one-off text check; the fluent workflow is notably better for understanding
+a behavior spread across several modules.
+
+Pain points and likely improvements:
+
+- **Index warm-up is opaque.** The status says it is fetching project
+  metadata, but does not say what capability becomes available, whether the
+  result is cached, or when it is ready.
+- **Large reads fail abruptly.** A 529-line read with `maxLines: 500` returned
+  only an error. For oversized files, return a structure view by default (or
+  alongside the first requested section) rather than a dead end.
+- **A structure-first view would improve orientation.** For example, list
+  imports, constants, types, impl blocks, functions, test modules, their line
+  spans, and byte/line sizes; then allow reads by stable structural handle,
+  such as `frame_loop::tick` or its `stage` phase.
+- **Handles need a concise usage contract.** They appear to be stable source
+  region identities, but their lifetime, invalidation/replacement behavior,
+  and the dependency relationship for edits should be stated near results.
+- **Result labels need a legend or a friendlier default.** Terms such as
+  `expr`, `ident`, and `range` are compact but unexplained on first use.
+- **Project-relative paths should be the default display.** Absolute paths are
+  precise but less scannable; retain them as an opt-in detail.
+- **Tool choice needs examples.** The distinction between literal discovery
+  (`find`) and semantic navigation (`refs`, `trace`) would be easier to learn
+  with one compact example each.
+- **A lightweight project-map command would help.** Roots, languages, build
+  files, indexing state, and LSP availability would make initial orientation
+  faster.

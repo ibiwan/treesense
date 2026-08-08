@@ -29,6 +29,7 @@ import {
   identifiersWithin,
   locate,
   mint,
+  qualifiedName,
   questionNode,
   type Located,
 } from "../locate.js";
@@ -51,6 +52,7 @@ export async function refs(ws: Workspace, args: RefsArgs): Promise<Reply> {
   const resolved = await anchorFor(ws, args.target);
   if ("error" in resolved) return { ok: false, text: `error: ${resolved.error}` };
   if ("candidates" in resolved) return candidates(ws, resolved.candidates);
+  if ("symbolCandidates" in resolved) return symbolicCandidates(ws, resolved.symbol, resolved.symbolCandidates);
 
   const { located, node } = resolved;
   await ws.lsp.whenReady();
@@ -130,6 +132,7 @@ const INTERESTING = new Set([
 type Resolution =
   | Anchor
   | { candidates: { located: Located; nodes: SyntaxNode[]; where: string } }
+  | { symbolCandidates: Anchor[]; symbol: string }
   | { error: string };
 
 async function anchorFor(ws: Workspace, target: string): Promise<Resolution> {
@@ -172,7 +175,47 @@ async function anchorFor(ws: Workspace, target: string): Promise<Resolution> {
     return { candidates: { located, nodes: idents, where: `${address.path}:${span}` } };
   }
 
-  return { error: `symbolic addresses are not implemented yet (${address.symbol})` };
+  return anchorForSymbol(ws, address.symbol);
+}
+
+/**
+ * LSP symbol search is deliberately broad; its response is a candidate list,
+ * not proof that a qualified address is exact. Re-parse the returned source
+ * and check the local qualified name before treating it as an address.
+ */
+async function anchorForSymbol(ws: Workspace, symbol: string): Promise<Resolution> {
+  const leaf = symbol.split("::").at(-1)!;
+  const locations = await ws.lsp.workspaceSymbols(leaf);
+  const found: Anchor[] = [];
+
+  for (const location of locations) {
+    const file = (await ws.files.canonical(uriToPath(location.location.uri))) as FilePath;
+    const located = await locate(ws, file);
+    if (located === null) continue;
+
+    const offset = positionToByte(located.snap, location.location.range.start, ws.lsp.positionEncoding);
+    const node = located.tree.nodeAt(offset);
+    if (node === null) continue;
+    const declaration = declares(located.tree, node) ?? located.tree.enclosingItem(node);
+    const question = declaration === null ? questionNode(located.tree, node) : questionNode(located.tree, declaration);
+    if (question === null) continue;
+
+    const qualified = declaration === null ? null : qualifiedName(located.tree, declaration);
+    // A qualified address needs an exact local verification. Bare names are
+    // inherently candidates: `scale` may exist in several crates or modules.
+    if (symbol.includes("::") ? qualified !== symbol : question.text() !== symbol) continue;
+    found.push({ located, node: question });
+  }
+
+  const unique = found.filter((candidate, i) =>
+    found.findIndex((other) =>
+      other.located.snap.path === candidate.located.snap.path
+      && other.node.bytes.start === candidate.node.bytes.start,
+    ) === i,
+  );
+  if (unique.length === 0) return { error: `symbol ${symbol} not found` };
+  if (unique.length === 1) return unique[0]!;
+  return { symbolCandidates: unique, symbol };
 }
 
 /**
@@ -221,6 +264,19 @@ function candidates(
 
   const header = `ambiguous: ${nodes.length} symbols on ${where} — call refs again with one of these handles`;
   return { ok: true, text: [header, ...snippet, ...lines].join("\n") };
+}
+
+function symbolicCandidates(ws: Workspace, symbol: string, found: Anchor[]): Reply {
+  const lines = found.map(({ located, node }) => {
+    const declaration = declares(located.tree, node) ?? located.tree.enclosingItem(node);
+    const full = mint(ws, located, declaration ?? node);
+    const qualified = declaration === null ? null : qualifiedName(located.tree, declaration);
+    return `${full.handle} ${full.file}:${full.lines.start} ${qualified ?? node.text()}`;
+  });
+  return {
+    ok: true,
+    text: `ambiguous: ${found.length} symbols matching ${symbol} — call refs again with one of these handles\n${lines.join("\n")}`,
+  };
 }
 
 function describeItem(item: SyntaxNode): string {

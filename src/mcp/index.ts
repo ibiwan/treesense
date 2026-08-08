@@ -26,7 +26,10 @@ async function main(): Promise<void> {
 
   const call = async (request: Request) => {
     const res = await daemon.send(request);
-    return { content: [{ type: "text" as const, text: res.text }], isError: !res.ok };
+    return {
+      content: [{ type: "text" as const, text: `${indexNotice(res.index)}${res.text}` }],
+      isError: !res.ok,
+    };
   };
 
   server.registerTool(
@@ -114,6 +117,27 @@ async function main(): Promise<void> {
   );
 
   await server.connect(new StdioServerTransport());
+}
+
+/**
+ * Visible only while warming: its purpose is to let an agent choose immediate
+ * read/find work over a semantic request that would otherwise wait silently.
+ */
+function indexNotice(index: {
+  readiness: "starting" | "indexing" | "ready" | "failed";
+  phase?: string | undefined;
+  message?: string | undefined;
+  percentage?: number | undefined;
+}): string {
+  if (index.readiness === "ready") return "";
+  if (index.readiness === "failed") return "index unavailable: rust-analyzer failed to start\n";
+
+  const detail = [
+    index.phase,
+    index.percentage === undefined ? undefined : `${index.percentage}%`,
+  ].filter((item): item is string => item !== undefined).join(" ");
+  const message = index.message === undefined ? "" : ` — ${index.message}`;
+  return `index warming${detail === "" ? "" : `: ${detail}`}${message}\n`;
 }
 
 void main();

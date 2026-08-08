@@ -67,13 +67,17 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
     return { ok: false, text: rejection(address.handle, deps) };
   }
 
+  // Witnessed from the target's own verdict, not from a fresh read. The
+  // handle was validated against one snapshot and the splice below is built
+  // against another — `locate` stats the file again — so a witness that took
+  // its own third look would stamp whatever landed in between and let it
+  // through. `resolve` stamps `full.generation` with the generation it
+  // actually checked the digest against, which is the one this write's
+  // premise rests on. See DESIGN.md § 3.
+  const witnessed = await witness(ws, [target.full], deps);
+
   const located = await locate(ws, target.full.file);
   const snap = located?.snap ?? (await ws.files.snapshot(target.full.file));
-
-  // Everything validated above was validated against *some* snapshot; the
-  // splice below is computed against *this* one. Record what each participant
-  // looked like now, so the same question can be asked again at commit time.
-  const witnessed = await witness(ws, [target.full.file], deps);
 
   // ---- Phase 2: build and check --------------------------------------------
   const splice = build(snap.content, target.full, args.action, args.content);

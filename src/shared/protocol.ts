@@ -131,11 +131,23 @@ export const Response = z.object({
   id: z.number().int().nonnegative(),
   ok: z.boolean(),
   text: z.string(),
+  // Accept a reply from a daemon that predates status snapshots. A warm
+  // daemon can outlive an MCP facade upgrade, so rejecting that reply would
+  // strand the caller instead of merely showing a conservative warm-up hint.
+  index: z.object({
+    readiness: z.enum(["starting", "indexing", "ready", "failed"]),
+    phase: z.string().optional(),
+    message: z.string().optional(),
+    percentage: z.number().int().min(0).max(100).optional(),
+  }).default({ readiness: "starting" }),
 });
 export type Response = z.infer<typeof Response>;
 
 /** What an action returns, before the daemon attaches the correlation id. */
-export type Reply = Omit<Response, "id">;
+export type Reply = Omit<Response, "id" | "index">;
+
+/** What crosses the daemon socket after it attaches its current index state. */
+export type DaemonReply = Omit<Response, "id">;
 
 /** Read caps. See api-def.md § Actions → READ. */
 export const READ_DEFAULT_AVG_BYTES_PER_LINE = 120;

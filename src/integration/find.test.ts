@@ -30,6 +30,20 @@ describe("find", { skip }, () => {
     assert.match(pattern.text, /^find "scale\(\$A, \$B\)" pattern /, pattern.text);
   });
 
+  test("case-insensitive fallback preserves exact search as the first reading", async () => {
+    const res = await fx.rpc({ op: "find", needle: "CLAMP" });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /^find "CLAMP" text \(case-insensitive fallback\) [1-9]/, res.text);
+    assert.match(res.text, /clamp/, res.text);
+  });
+
+  test("normalized fallback bridges camel and snake identifier spellings", async () => {
+    const res = await fx.rpc({ op: "find", needle: "RunsToCompletion" });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /^find "RunsToCompletion" text \(normalized fallback\) [1-9]/, res.text);
+    assert.match(res.text, /runs_to_completion/, res.text);
+  });
+
   test("a structural pattern matches by shape, not by spelling", async () => {
     // Two call sites with different arguments — `scale(seed, step)` and
     // `scale(seed + 1, step)`. No literal string matches both.

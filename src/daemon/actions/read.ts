@@ -1,10 +1,6 @@
 /**
- * READ — content, or a reason it could not be returned. Never navigation.
- *
- * The split is deliberate: FIND and REFS resolve addresses and hand back
- * structure, sizes and handles; by the time READ is called the decision is
- * already made. That only pays off if those responses are complete enough
- * that every read is an informed call, which is what lets READ stay this dumb.
+ * READ — source when it fits, a handle-bearing structural overview when it
+ * does not. A giant source dump is neither reading nor useful navigation.
  */
 
 import { parseAddress } from "../../shared/address.js";
@@ -14,7 +10,9 @@ import {
 } from "../../shared/protocol.js";
 import { handlePlus } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
-import type { Handle } from "../../shared/types.js";
+import type { ByteRange, FilePath, Handle } from "../../shared/types.js";
+import { locate, mint, type Located } from "../locate.js";
+import type { SyntaxNode } from "../syntax.js";
 import type { Workspace } from "../workspace.js";
 
 export interface ReadArgs {
@@ -22,6 +20,11 @@ export interface ReadArgs {
   maxLines?: number | undefined;
   maxBytesPerLine?: number | undefined;
 }
+
+/** A compact enough source body is still more useful than an outline. */
+const OVERVIEW_MAX_LINES = 120;
+const OVERVIEW_MAX_BYTES = 24 * 1024;
+const MAX_OVERVIEW_SECTIONS = 40;
 
 export async function read(ws: Workspace, args: ReadArgs): Promise<Reply> {
   const address = parseAddress(args.target);
@@ -31,13 +34,13 @@ export async function read(ws: Workspace, args: ReadArgs): Promise<Reply> {
   }
 
   if (address.form === "handle") {
-    return readHandle(ws, address.handle);
+    return readHandle(ws, address.handle, args);
   }
 
   return readPosition(ws, address.path, address.lines, args);
 }
 
-async function readHandle(ws: Workspace, handle: Handle): Promise<Reply> {
+async function readHandle(ws: Workspace, handle: Handle, args: ReadArgs): Promise<Reply> {
   const resolved = await ws.handles.resolve(handle);
 
   switch (resolved.status) {
@@ -52,9 +55,11 @@ async function readHandle(ws: Workspace, handle: Handle): Promise<Reply> {
       const full = resolved.full;
       const snap = await ws.files.snapshot(full.file);
       const body = snap.content.subarray(full.bytes.start, full.bytes.end).toString("utf8");
-      // No cap on a handle read: the size was shown at selection time, so
-      // second-guessing it here would just be a round trip to say "yes, really".
       const marker = resolved.status === "changed" ? "changed: " : "";
+      if (shouldOverview(full.lines.end - full.lines.start + 1, full.bytes.end - full.bytes.start, args)) {
+        const overview = await renderOverview(ws, full.file, full.bytes);
+        if (overview !== null) return { ok: true, text: `${marker}${overview}` };
+      }
       return { ok: true, text: `${marker}${handlePlus(full, { withPath: true })}\n${body}` };
     }
   }
@@ -105,11 +110,85 @@ async function readPosition(
     }
   }
 
+  if (shouldOverview(requested, total, args)) {
+    const overview = await renderOverview(ws, file, bytes);
+    if (overview !== null) return { ok: true, text: overview };
+  }
+
   const body = snap.content.subarray(bytes.start, bytes.end).toString("utf8");
   // Echo the canonical path, not the caller's spelling: a file that appears
   // under two names across responses undermines the identity the whole
   // generation scheme is keyed on.
   return { ok: true, text: `${file}:${span.start}-${span.end}\n${body}` };
+}
+
+/** Explicitly disabling either existing read limit means the caller wants bytes. */
+function shouldOverview(lines: number, bytes: number, args: ReadArgs): boolean {
+  if (args.maxLines === -1 || args.maxBytesPerLine === -1) return false;
+  return lines > OVERVIEW_MAX_LINES || bytes > OVERVIEW_MAX_BYTES;
+}
+
+/**
+ * The overview is parser-derived, never a generated prose summary. It offers
+ * the shallowest declarations in the requested range; if a large function has
+ * no nested declarations, its first-level branches and loops are useful next
+ * choices instead.
+ */
+async function renderOverview(ws: Workspace, file: FilePath, bytes: ByteRange): Promise<string | null> {
+  const located = await locate(ws, file);
+  if (located === null) return null;
+
+  const items = directItems(located, bytes);
+  const sections = items.length > 0 ? items : directControlFlow(located, bytes);
+  const lines = located.snap.index.linesForBytes(bytes);
+  const length = bytes.end - bytes.start;
+  const header = `overview ${file}:${lines.start}-${lines.end} — ${lines.end - lines.start + 1} lines, ${formatBytes(length)}`;
+  if (sections.length === 0) {
+    return `${header}\n(no nested sections; pass maxLines=-1 or maxBytesPerLine=-1 to read source)`;
+  }
+  return `${header}\n${sections.slice(0, MAX_OVERVIEW_SECTIONS).map((node) => `> ${handlePlus(mint(ws, located, node))}`).join("\n")}`
+    + (sections.length > MAX_OVERVIEW_SECTIONS ? `\n… capped at ${MAX_OVERVIEW_SECTIONS} sections` : "");
+}
+
+function directItems(located: Located, within: ByteRange): SyntaxNode[] {
+  const items = located.tree.items().filter((item) => {
+    const range = located.tree.itemRangeWithDocs(item);
+    // A handle to one declaration must reveal what is inside it, not hand the
+    // same declaration back as its only "section".
+    const isWholeRequest = range.start === within.start && range.end === within.end;
+    return !isWholeRequest && range.start >= within.start && range.end <= within.end;
+  });
+  return items.filter((item) => !items.some((outer) => {
+    if (outer === item) return false;
+    const a = located.tree.itemRangeWithDocs(outer);
+    const b = located.tree.itemRangeWithDocs(item);
+    return a.start <= b.start && a.end >= b.end;
+  }));
+}
+
+function directControlFlow(located: Located, within: ByteRange): SyntaxNode[] {
+  const out: SyntaxNode[] = [];
+  const walk = (node: SyntaxNode, insideControl: boolean): void => {
+    for (const child of node.children()) {
+      const range = child.bytes;
+      if (range.end <= within.start || range.start >= within.end) continue;
+      const contained = range.start >= within.start && range.end <= within.end;
+      const control = child.kind === "branch" || child.kind === "loop";
+      if (contained && control && !insideControl) {
+        out.push(child);
+        continue;
+      }
+      walk(child, insideControl || (contained && control));
+    }
+  };
+  walk(located.tree.rootNode, false);
+  return out;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function err(message: string): Reply {

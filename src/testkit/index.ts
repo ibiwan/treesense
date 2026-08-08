@@ -30,6 +30,7 @@ export const FIXTURE = join(repoRoot, "fixtures", "rust-workspace");
  * in which case point this at a directory inside the workspace.
  */
 const SOCKET_DIR = process.env.FLUENT_SOCKET_DIR ?? tmpdir();
+const TCP_HOST = "127.0.0.1";
 
 /** LSP tests need the real binary; skip rather than fail when it is absent. */
 export function hasRustAnalyzer(): boolean {
@@ -42,38 +43,24 @@ export function hasRustAnalyzer(): boolean {
 }
 
 /**
- * Can we actually bind a unix socket here?
- *
- * Sandboxes commonly deny this with EPERM, and a suite that dies on the first
- * `before` hook reports seven mysterious failures rather than one clear
- * reason. Probe once and skip with an explanation instead.
- */
-export function canBindSocket(): boolean {
-  const probe = join(SOCKET_DIR, `fl-probe-${process.pid}.sock`);
-  try {
-    mkdirSync(SOCKET_DIR, { recursive: true });
-    const server = createServer();
-    server.listen(probe);
-    server.close();
-    rmSync(probe, { force: true });
-    return true;
-  } catch {
-    rmSync(probe, { force: true });
-    return false;
-  }
-}
-
-/**
  * One reason string for the whole integration suite, or `false` to run it.
  * Every prerequisite that can be missing gets named here rather than
  * presenting as a failure somewhere inside a hook.
  */
 export function skipReason(): string | false {
   if (!hasRustAnalyzer()) return "rust-analyzer is not on PATH";
-  if (!canBindSocket()) {
-    return `cannot bind a unix socket in ${SOCKET_DIR} — set FLUENT_SOCKET_DIR to a writable path`;
-  }
   return false;
+}
+
+type Transport =
+  | { kind: "unix"; socket: string }
+  | { kind: "stdio" };
+
+interface Connection {
+  input: NodeJS.ReadableStream;
+  write(chunk: string): void;
+  once(event: "close", listener: () => void): void;
+  destroy(): void;
 }
 
 export interface Harness {
@@ -101,11 +88,18 @@ export async function startFixture(): Promise<Running> {
 
   // Short socket path on purpose: sun_path caps near 104 bytes and a long
   // tmpdir plus a long name silently produces a daemon that never binds.
-  const socket = join(SOCKET_DIR, `fl-${process.pid}-${counter++}.sock`);
+  const transport = (await canBindSocket())
+    ? ({ kind: "unix", socket: join(SOCKET_DIR, `fl-${process.pid}-${counter++}.sock`) } as const)
+    : ({ kind: "stdio" } as const);
 
   const daemon = spawn(process.execPath, [join(repoRoot, "dist", "daemon", "index.js"), root], {
-    env: { ...process.env, FLUENT_SOCKET: socket },
-    stdio: ["ignore", "ignore", "pipe"],
+    env: {
+      ...process.env,
+      ...(transport.kind === "unix"
+        ? { FLUENT_SOCKET: transport.socket }
+        : { FLUENT_STDIO: "1" }),
+    },
+    stdio: transport.kind === "stdio" ? ["pipe", "pipe", "pipe"] : ["ignore", "ignore", "pipe"],
   });
   spawned.add(daemon);
   daemon.once("exit", () => spawned.delete(daemon));
@@ -114,11 +108,14 @@ export async function startFixture(): Promise<Running> {
   daemon.stderr?.setEncoding("utf8");
   daemon.stderr?.on("data", (chunk: string) => log.push(chunk));
 
-  const conn = await waitForSocket(socket, daemon, log);
+  const conn =
+    transport.kind === "stdio"
+      ? waitForStdio(daemon, log)
+      : await waitForTransport(transport, daemon, log);
   const pending = new Map<number, (reply: Reply) => void>();
   let nextId = 0;
 
-  createInterface({ input: conn }).on("line", (line) => {
+  createInterface({ input: conn.input }).on("line", (line) => {
     const res = JSON.parse(line) as Reply & { id: number };
     pending.get(res.id)?.({ ok: res.ok, text: res.text });
     pending.delete(res.id);
@@ -169,7 +166,7 @@ export async function startFixture(): Promise<Running> {
       await endProcess(daemon);
       spawned.delete(daemon);
       await rm(root, { recursive: true, force: true });
-      await rm(socket, { force: true });
+      if (transport.kind === "unix") await rm(transport.socket, { force: true });
     },
   };
 }
@@ -191,16 +188,22 @@ for (const signal of ["exit", "SIGINT", "SIGTERM"] as const) {
   });
 }
 
-async function waitForSocket(path: string, daemon: ChildProcess, log: string[]): Promise<Socket> {
+async function waitForTransport(
+  transport: Transport,
+  daemon: ChildProcess,
+  log: string[],
+): Promise<Connection> {
   for (let i = 0; i < 100; i++) {
     if (daemon.exitCode !== null) {
       throw new Error(`daemon exited ${daemon.exitCode}:\n${log.join("")}`);
     }
-    const sock = await tryConnect(path);
+    const sock = await tryConnect(transport);
     if (sock !== null) return sock;
     await delay(100);
   }
-  throw new Error(`daemon never listened on ${path}:\n${log.join("")}`);
+  const where =
+    transport.kind === "unix" ? transport.socket : "stdio";
+  throw new Error(`daemon never listened on ${where}:\n${log.join("")}`);
 }
 
 async function waitForIndex(rpc: (r: RequestInput) => Promise<Reply>, log: string[]): Promise<void> {
@@ -215,12 +218,83 @@ async function waitForIndex(rpc: (r: RequestInput) => Promise<Reply>, log: strin
   throw new Error(`index never became ready:\n${log.join("")}`);
 }
 
-function tryConnect(path: string): Promise<Socket | null> {
+function tryConnect(transport: Transport): Promise<Connection | null> {
   return new Promise((resolve) => {
-    const sock = connect(path);
-    sock.once("connect", () => resolve(sock));
+    if (transport.kind !== "unix") {
+      resolve(null);
+      return;
+    }
+    const sock = connect(transport.socket);
+    sock.once("connect", () =>
+      resolve({
+        input: sock,
+        write(chunk: string): void {
+          sock.write(chunk);
+        },
+        once(event: "close", listener: () => void): void {
+          sock.once(event, listener);
+        },
+        destroy(): void {
+          sock.destroy();
+        },
+      }),
+    );
     sock.once("error", () => resolve(null));
   });
+}
+
+/**
+ * Can we actually bind a unix socket here?
+ *
+ * This must wait for the bind result. `server.listen(path); server.close();`
+ * looks synchronous but the error arrives later on the event loop, which is
+ * how a denied bind turns into a misleading uncaught exception after the test
+ * already moved on.
+ */
+async function canBindSocket(): Promise<boolean> {
+  const probe = join(SOCKET_DIR, `fl-probe-${process.pid}.sock`);
+  mkdirSync(SOCKET_DIR, { recursive: true });
+  const server = createServer();
+
+  return await new Promise((resolve) => {
+    const finish = (ok: boolean): void => {
+      rmSync(probe, { force: true });
+      resolve(ok);
+    };
+
+    server.once("error", () => {
+      server.close();
+      finish(false);
+    });
+    server.listen(probe, () => {
+      server.close(() => finish(true));
+    });
+  });
+}
+
+function waitForStdio(daemon: ChildProcess, log: string[]): Connection {
+  const input = daemon.stdout;
+  const output = daemon.stdin;
+  if (input === null || output === null) {
+    throw new Error("daemon stdio was not piped");
+  }
+
+  if (daemon.exitCode !== null) {
+    throw new Error(`daemon exited ${daemon.exitCode}:\n${log.join("")}`);
+  }
+  return {
+    input,
+    write(chunk: string): void {
+      output.write(chunk);
+    },
+    once(event: "close", listener: () => void): void {
+      input.once(event, listener);
+    },
+    destroy(): void {
+      output.end();
+      input.destroy();
+    },
+  };
 }
 
 /** SIGTERM, then SIGKILL if it will not go. Resolves once it is gone. */

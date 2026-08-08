@@ -116,7 +116,14 @@ async function moveSameFile(
     return { ok: true, text: `${handlePlus(source, { withPath: true })} unchanged — destination is adjacent to source` };
   }
 
-  const witnessed = await witness(ws, [source.file], deps);
+  // Both participants vouch for the generation their own phase-1 validation
+  // ran against, so this asks disk nothing — which is the point: `locate`
+  // above already took its own fresh look, and a witness that took a third
+  // would stamp whatever landed in between and let it through. Source and
+  // destination were resolved one after the other; if they disagree the file
+  // moved between those two checks, and the lower stamp is what makes
+  // `recheck` refuse.
+  const witnessed = await witness(ws, [source, destination], deps);
 
   const movedText = snap.content.subarray(source.bytes.start, source.bytes.end).toString("utf8");
   const insertSplice = build(snap.content, destination, args.action, movedText);
@@ -184,17 +191,20 @@ async function moveCrossFile(
   const sourceLocated = await locate(ws, source.file);
   if (sourceLocated === null) return fail(`no grammar for ${source.file}`);
 
-  // Witnessed here, immediately after both reads and before any build work —
-  // not just destination.file. `movedText` below is copied from source into
-  // destination's own payload, so source's freshness is as load-bearing to
-  // this write as destination's is; checking it only via the source handle's
-  // digest (phase 1, above) is not enough, because a digest match tolerates
-  // any change elsewhere in the file, and the recheck below needs to answer
-  // a stricter question: did *this exact snapshot*, the one `movedText` was
-  // sliced from, survive intact all the way to the write. Recheck happens
-  // right before the write, after build+parse, closing the window across
-  // both — the same bracket `edit`'s own witness/recheck pair uses.
-  const destWitness = await witness(ws, [destination.file, source.file], deps);
+  // Both files, not just destination. `movedText` below is copied from source
+  // into destination's own payload, so source's freshness is as load-bearing
+  // to this write as destination's is; checking it only via the source
+  // handle's digest (phase 1, above) is not enough, because a digest match
+  // tolerates any change elsewhere in the file. The recheck before the write
+  // has to answer a stricter question: did *this exact snapshot*, the one
+  // `movedText` was sliced from, survive intact all the way to the write.
+  //
+  // Which is why these are the generations phase 1 validated against rather
+  // than a fresh pair of reads. The two `locate` calls above already looked at
+  // disk; a witness that looked a third time would absorb anything that landed
+  // between look and look, and then agree with itself at commit. See
+  // DESIGN.md § 3.
+  const destWitness = await witness(ws, [destination, source], deps);
 
   const movedText = sourceLocated.snap.content.subarray(source.bytes.start, source.bytes.end).toString("utf8");
   const insertSplice = build(destLocated.snap.content, destination, args.action, movedText);
@@ -252,6 +262,23 @@ async function moveCrossFile(
   const finalSource = sourceRecheck.full;
   const finalSourceLocated = await locate(ws, source.file);
   if (finalSourceLocated === null) return fail(`no grammar for ${source.file}`);
+
+  // The same two-looks gap once more, and this is the worst place for it: the
+  // splice below deletes `finalSource.bytes`, a range validated against the
+  // resolve above, out of a buffer `locate` read separately. If a write landed
+  // between them the coordinates address the wrong bytes, and this is the one
+  // destructive write in the verb. Cheap to refuse, and refusing is a partial
+  // result rather than a failure — the destination copy already exists, so
+  // nothing is lost by leaving the source in place.
+  if (finalSourceLocated.snap.generation !== finalSource.generation) {
+    return {
+      ok: false,
+      text: [
+        `move partial: inserted ${inserted}`,
+        `${source.file} changed before the source could be removed — delete it by hand or re-query`,
+      ].join("\n"),
+    };
+  }
 
   const deleteSplice = build(finalSourceLocated.snap.content, finalSource, "delete", "");
   const nextSource = splice(finalSourceLocated.snap.content, deleteSplice.range, deleteSplice.text);

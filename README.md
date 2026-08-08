@@ -31,7 +31,7 @@ Handles die when the daemon dies, not when a client disconnects.
 | | |
 |---|---|
 | `find`  | search; returns hits grouped by file and enclosing item |
-| `read`  | source, or a reason it can't be returned — never navigation |
+| `read`  | source when compact; a handle-bearing structural overview when large |
 | `refs`  | references to a symbol; blocks on the index |
 | `edit`  | modify at a handle, guarded by the target and declared deps |
 | `move`  | relocate a handle's bytes before/after another handle, same-file or cross-file |
@@ -50,8 +50,8 @@ the handle table including rebasing, identity-based relocation and the
 `changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the ast-grep syntax
 layer; the rust-analyzer client.
 
-Symbolic addresses (`Widget::count`) are accepted by the grammar but not yet
-resolved — they need `workspace/symbol`.
+Symbolic addresses resolve in `refs` through `workspace/symbol`; ambiguous
+names return handle-bearing candidates rather than being guessed.
 
 What's left is M7: dogfooding against a real workload to measure whether this
 actually costs fewer tokens than `grep`/`cat`. See [PLAN.md](PLAN.md).

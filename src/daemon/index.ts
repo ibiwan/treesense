@@ -11,10 +11,11 @@
  * First client to connect starts it; it outlives them all.
  */
 
-import { connect, createServer, type Socket } from "node:net";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { rmSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import type { Readable, Writable } from "node:stream";
 
 import { Outer, Request, type Reply } from "../shared/protocol.js";
 import { socketPathFor } from "../shared/socket.js";
@@ -26,6 +27,8 @@ import { refs } from "./actions/refs.js";
 import { trace } from "./actions/trace.js";
 import { registerLanguages } from "./syntax.js";
 import { Workspace } from "./workspace.js";
+
+const TCP_HOST = "127.0.0.1";
 
 async function dispatch(ws: Workspace, request: Request): Promise<Reply> {
   switch (request.op) {
@@ -60,8 +63,8 @@ function describe(cause: unknown): string {
   return (cause as Error).message;
 }
 
-function handle(ws: Workspace, socket: Socket): void {
-  const lines = createInterface({ input: socket });
+function handle(ws: Workspace, input: Readable, output: Writable): void {
+  const lines = createInterface({ input });
   lines.on("line", (line) => {
     void (async () => {
       // The id is recovered separately from the request body, because a
@@ -83,7 +86,9 @@ function handle(ws: Workspace, socket: Socket): void {
         process.stderr.write(`dropping unaddressable request: ${reply.text}\n`);
         return;
       }
-      socket.write(`${JSON.stringify({ id, ...reply })}\n`);
+      // Snapshot after the action: a semantic request can spend most of its
+      // lifetime waiting for rust-analyzer, so state at dispatch time lies.
+      output.write(`${JSON.stringify({ id, ...reply, index: ws.lsp.indexStatus })}\n`);
     })();
   });
 }
@@ -106,6 +111,17 @@ function isServed(path: string): Promise<boolean> {
   });
 }
 
+function isServedTcp(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = connect(port, TCP_HOST);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => resolve(false));
+  });
+}
+
 async function main(): Promise<void> {
   // Dynamic grammars are registered process-wide and exactly once, so this
   // belongs at startup rather than inside a lazy parse.
@@ -119,21 +135,50 @@ async function main(): Promise<void> {
   const requested = process.argv[2] ?? process.cwd();
   const root = await realpath(requested).catch(() => requested);
   const targetDir = process.env.FLUENT_TARGET_DIR;
+  const tcpPort = Number(process.env.FLUENT_TCP_PORT ?? "");
+  const useStdio = process.env.FLUENT_STDIO === "1";
 
-  const path = socketPathFor(root);
-
-  // Never unlink blindly. A socket file that is still being served means
-  // another daemon owns this root, and deleting it would orphan a process
-  // holding a warm index and the entire handle table — while new clients
-  // silently got a daemon whose handles are all void.
-  if (await isServed(path)) {
-    process.stderr.write(`fluentd already serving ${root}\n`);
-    return;
-  }
-  rmSync(path, { force: true });
+  const useTcp = !useStdio && Number.isInteger(tcpPort) && tcpPort > 0;
+  const socketPath = useStdio || useTcp ? undefined : socketPathFor(root);
 
   const ws = new Workspace(root, targetDir);
-  const server = createServer((socket) => handle(ws, socket));
+
+  if (useStdio) {
+    handle(ws, process.stdin, process.stdout);
+
+    const shutdown = (): void => {
+      void ws.stop().finally(() => process.exit(0));
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    process.stdin.on("end", shutdown);
+
+    ws.start().catch((cause: unknown) => {
+      process.stderr.write(`rust-analyzer failed to start: ${String(cause)}\n`);
+    });
+    return;
+  }
+
+  if (useTcp) {
+    if (await isServedTcp(tcpPort)) {
+      process.stderr.write(`fluentd already serving ${root} on tcp ${TCP_HOST}:${tcpPort}\n`);
+      return;
+    }
+  } else {
+    const path = socketPath;
+    if (path === undefined) throw new Error("unreachable: unix transport without socket path");
+    // Never unlink blindly. A socket file that is still being served means
+    // another daemon owns this root, and deleting it would orphan a process
+    // holding a warm index and the entire handle table — while new clients
+    // silently got a daemon whose handles are all void.
+    if (await isServed(path)) {
+      process.stderr.write(`fluentd already serving ${root}\n`);
+      return;
+    }
+    rmSync(path, { force: true });
+  }
+
+  const server = createServer((socket) => handle(ws, socket, socket));
 
   server.on("error", (cause: NodeJS.ErrnoException) => {
     // Two daemons can clear the check above simultaneously; whoever loses the
@@ -146,17 +191,25 @@ async function main(): Promise<void> {
     // Otherwise: staying alive holding a socket that was never bound is worse
     // than exiting — healthy-looking and unreachable. The usual cause is
     // sun_path, which the kernel caps near 104 bytes without failing loudly.
-    process.stderr.write(`fluentd cannot listen on ${path}: ${cause.message}\n`);
+    const where = useTcp ? `${TCP_HOST}:${tcpPort}` : socketPath;
+    process.stderr.write(`fluentd cannot listen on ${where}: ${cause.message}\n`);
     process.exit(1);
   });
 
-  server.listen(path, () => {
-    process.stderr.write(`fluentd listening ${path}\n`);
-  });
+  if (useTcp) {
+    server.listen(tcpPort, TCP_HOST, () => {
+      const addr = server.address() as AddressInfo;
+      process.stderr.write(`fluentd listening tcp ${addr.address}:${addr.port}\n`);
+    });
+  } else {
+    server.listen(socketPath, () => {
+      process.stderr.write(`fluentd listening ${socketPath}\n`);
+    });
+  }
 
   const shutdown = (): void => {
     server.close();
-    rmSync(path, { force: true });
+    if (socketPath !== undefined) rmSync(socketPath, { force: true });
     void ws.stop().finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

@@ -66,7 +66,7 @@ Language-specific fully qualified symbol, e.g. `Widget::count`
 | **arguments** | |
 | Needle    | Double-Quoted string to search for |
 | Haystack  | Location Reference (handle \| position) |
-| Mode      | Inferred from the needle's shape; no parameter. A `$VAR` metavariable means an ast-grep pattern, anything else is literal text. Explicit modes remain unimplemented. |
+| Mode      | Inferred from the needle's shape; no parameter. A `$VAR` metavariable means an ast-grep pattern, anything else is literal text. A literal zero retries ASCII case-insensitive, then identifier-normalized (`MarineSprite` = `marine_sprite`) matching; the header names any fallback. |
 | **returns** |  |
 | Header | `find "<needle>" text\|pattern <count>` — the reading used is stated, so a misread costs one line rather than a round trip. A trailing `+` means the cap was hit. |
 | Hits | All Hits |
@@ -102,17 +102,18 @@ during cold start.
 | -- | -- |
 | **arguments** | |
 | Target | Handle obtained from `find` or `refs`, or Position |
-| Max Lines | Optional (specify if position is filename without line range, -1 for no limit) |
-| Max Bytes per Line | Optional. Specify if using position and risk of long lines.  Default 120 if using position, -1 (no limit) if using handle. Calculated average across response, NOT per line. If single line position (not handle) default is 1024 |
+| Max Lines | Optional. `-1` explicitly requests source rather than an automatic overview. |
+| Max Bytes per Line | Optional density guard for position reads; default 120 (1024 for one line). `-1` explicitly requests source rather than an automatic overview. Calculated average across response, NOT per-line. |
 | **returns** |  |
 | Handle Plus | If handle has changed, this will be the one representing the new version. Prefixed with "changed: " if changed. |
 | Content | All lines to end of response are literal file content with whitespace as-is |
+| Overview | Oversized parsed reads return shallow sections with handles, ranges, kinds and names. Whole files list top-level declarations; large declaration handles list nested declarations or first-level branches/loops. |
 | Error | With description (instead of Handle/Content if target is invalid or maximums are exceeded) |
 
 | REFS | |
 | -- | -- |
 | **arguments** | |
-| Handle \| Position \| Symbolic | Symbolic is **not yet implemented** — needs `workspace/symbol`. |
+| Handle \| Position \| Symbolic | Symbolic resolves through `workspace/symbol`; a non-unique name returns candidates. |
 | **returns** | (if...) |
 | Hits | handle points to one token |
 | | handle points to a named declaration block |

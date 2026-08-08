@@ -59,14 +59,57 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
   const scope = await resolveScope(ws, args.haystack, structural);
   if ("error" in scope) return { ok: false, text: `error: ${scope.error}` };
 
+  let reading: "pattern" | LiteralReading = structural ? "pattern" : "text";
+  let result = await collectMatches(ws, scope, needle, structural ? "structural" : "exact");
+  if ("error" in result) return { ok: false, text: `error: ${result.error}` };
+
+  // Exact remains the contract. Looser readings only rescue a true zero, and
+  // each reports itself so an agent never mistakes a normalized hit for an
+  // exact spelling match.
+  if (!structural && result.total === 0) {
+    result = await collectMatches(ws, scope, needle, "ascii-insensitive");
+    if ("error" in result) return { ok: false, text: `error: ${result.error}` };
+    reading = "text (case-insensitive fallback)";
+    if (result.total === 0) {
+      result = await collectMatches(ws, scope, needle, "normalized");
+      if ("error" in result) return { ok: false, text: `error: ${result.error}` };
+      reading = "text (normalized fallback)";
+    }
+  }
+
+  const header = `find ${JSON.stringify(needle)} ${reading} ${result.total}${result.truncated || scope.unwalked ? "+" : ""}`;
+
+  const notes: string[] = [];
+  if (result.truncated) notes.push(`… capped at ${MAX_HITS} hits; narrow with haystack`);
+  if (scope.unwalked) notes.push("… file limit reached; some files were never searched");
+  const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
+
+  if (result.total === 0) return { ok: true, text: `${header}${note}` };
+  return { ok: true, text: `${header}\n${renderHits(result.groups)}${note}` };
+}
+
+type LiteralReading = "text" | "text (case-insensitive fallback)" | "text (normalized fallback)";
+type MatchMode = "structural" | "exact" | "ascii-insensitive" | "normalized";
+
+interface MatchResults {
+  groups: Map<string, Hit[]>;
+  total: number;
+  truncated: boolean;
+}
+
+async function collectMatches(
+  ws: Workspace,
+  scope: Exclude<Scope, { error: string }>,
+  needle: string,
+  mode: MatchMode,
+): Promise<MatchResults | { error: string }> {
+  const structural = mode === "structural";
   const groups = new Map<string, Hit[]>();
   let total = 0;
   let truncated = false;
   // A capped *walk* means files were never looked at, which is a different and
   // more serious incompleteness than a capped hit list: the caller cannot tell
   // from the results that anything was skipped.
-  let unwalked = scope.unwalked;
-
   for (const file of scope.files) {
     if (total >= MAX_HITS) {
       truncated = true;
@@ -83,7 +126,7 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
       // its sibling is not a cap: a README with 500 matches would report an
       // uncapped count with no marker, which is precisely what the contract
       // promises never to do.
-      const plain = await plainMatches(ws, file, needle, scope.within, MAX_HITS - total);
+      const plain = await plainMatches(ws, file, needle, scope.within, MAX_HITS - total, mode);
       if (plain.hits.length > 0) {
         groups.set(file, plain.hits);
         total += plain.hits.length;
@@ -94,8 +137,8 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
 
     const found = structural
       ? structuralMatches(located, needle)
-      : textMatches(located, needle);
-    if (!Array.isArray(found)) return { ok: false, text: `error: ${found.error}` };
+      : textMatches(located, needle, mode);
+    if (!Array.isArray(found)) return { error: found.error };
 
     const hits: Hit[] = [];
     for (const offset of found) {
@@ -116,30 +159,83 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
     }
   }
 
-  const reading = structural ? "pattern" : "text";
-  const header = `find ${JSON.stringify(needle)} ${reading} ${total}${truncated || unwalked ? "+" : ""}`;
-
-  const notes: string[] = [];
-  if (truncated) notes.push(`… capped at ${MAX_HITS} hits; narrow with haystack`);
-  if (unwalked) notes.push("… file limit reached; some files were never searched");
-  const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
-
-  if (total === 0) return { ok: true, text: `${header}${note}` };
-  return { ok: true, text: `${header}\n${renderHits(groups)}${note}` };
+  return { groups, total, truncated };
 }
 
 /** Byte offsets of literal occurrences. */
-function textMatches(located: Located, needle: string): number[] {
+function textMatches(located: Located, needle: string, mode: Exclude<MatchMode, "structural">): number[] {
+  return literalOffsets(located.snap.content, needle, mode);
+}
+
+/**
+ * ASCII-only by design. Unicode case folding can expand a character and make
+ * a match offset differ from the source byte offset that handles rely on.
+ */
+function literalOffsets(content: Buffer, needle: string, mode: Exclude<MatchMode, "structural">): number[] {
+  if (mode === "normalized") return normalizedOffsets(content, needle);
+
   const pattern = Buffer.from(needle, "utf8");
+  const haystack = mode === "ascii-insensitive" ? asciiFold(content) : content;
+  const query = mode === "ascii-insensitive" ? asciiFold(pattern) : pattern;
   const out: number[] = [];
   let from = 0;
   for (;;) {
-    const at = located.snap.content.indexOf(pattern, from);
-    if (at === -1) break;
+    const at = haystack.indexOf(query, from);
+    if (at === -1) return out;
     out.push(at);
-    from = at + pattern.length;
+    from = at + query.length;
+  }
+}
+
+function asciiFold(input: Buffer): Buffer {
+  const folded = Buffer.from(input);
+  for (let i = 0; i < folded.length; i++) {
+    const byte = folded[i]!;
+    if (byte >= 0x41 && byte <= 0x5a) folded[i] = byte + 0x20;
+  }
+  return folded;
+}
+
+/**
+ * Identifier normalization, not fuzzy matching: separator and camel-case
+ * variants collapse to the same ASCII spelling. A source candidate remains a
+ * single identifier-like run, so unrelated words across a sentence cannot be
+ * silently joined into a match.
+ */
+function normalizedOffsets(content: Buffer, needle: string): number[] {
+  const query = normalizeIdentifier(Buffer.from(needle, "utf8"));
+  if (query.length === 0) return [];
+
+  const out: number[] = [];
+  let start: number | null = null;
+  for (let i = 0; i <= content.length; i++) {
+    const byte = content[i];
+    if (byte !== undefined && isIdentifierByte(byte)) {
+      if (start === null) start = i;
+      continue;
+    }
+    if (start !== null) {
+      if (normalizeIdentifier(content.subarray(start, i)).equals(query)) out.push(start);
+      start = null;
+    }
   }
   return out;
+}
+
+function isIdentifierByte(byte: number): boolean {
+  return (byte >= 0x30 && byte <= 0x39)
+    || (byte >= 0x41 && byte <= 0x5a)
+    || (byte >= 0x61 && byte <= 0x7a)
+    || byte === 0x5f || byte === 0x2d;
+}
+
+function normalizeIdentifier(input: Buffer): Buffer {
+  const out: number[] = [];
+  for (const byte of input) {
+    if (byte >= 0x41 && byte <= 0x5a) out.push(byte + 0x20);
+    else if ((byte >= 0x61 && byte <= 0x7a) || (byte >= 0x30 && byte <= 0x39)) out.push(byte);
+  }
+  return Buffer.from(out);
 }
 
 /**
@@ -177,17 +273,13 @@ async function plainMatches(
   needle: string,
   within: { start: number; end: number } | null,
   budget: number,
+  mode: Exclude<MatchMode, "structural">,
 ): Promise<{ hits: Hit[]; truncated: boolean }> {
   const snap = await ws.files.snapshot(file).catch(() => null);
   if (snap === null || looksBinary(snap.content)) return { hits: [], truncated: false };
 
-  const pattern = Buffer.from(needle, "utf8");
   const hits: Hit[] = [];
-  let from = 0;
-  for (;;) {
-    const at = snap.content.indexOf(pattern, from);
-    if (at === -1) break;
-    from = at + pattern.length;
+  for (const at of literalOffsets(snap.content, needle, mode)) {
     if (within !== null && (at < within.start || at >= within.end)) continue;
     if (hits.length >= budget) return { hits, truncated: true };
 

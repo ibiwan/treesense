@@ -12,7 +12,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { Response, type Reply, type Request } from "../shared/protocol.js";
+import { Response, type DaemonReply, type Request } from "../shared/protocol.js";
 import { socketPathFor } from "../shared/socket.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,14 +27,14 @@ export class DaemonClient {
   private socket: Socket | null = null;
   private nextId = 0;
   /** Keyed by correlation id — the daemon answers concurrently, not in order. */
-  private readonly pending = new Map<number, (reply: Reply) => void>();
+  private readonly pending = new Map<number, (reply: DaemonReply) => void>();
 
   constructor(private readonly root: string) {}
 
-  async send(request: Request): Promise<Reply> {
+  async send(request: Request): Promise<DaemonReply> {
     const socket = await this.ensure();
     const id = this.nextId++;
-    return new Promise<Reply>((resolve) => {
+    return new Promise<DaemonReply>((resolve) => {
       this.pending.set(id, resolve);
       socket.write(`${JSON.stringify({ id, request })}\n`);
     });
@@ -62,7 +62,7 @@ export class DaemonClient {
       const waiter = this.pending.get(response.id);
       if (waiter === undefined) return;
       this.pending.delete(response.id);
-      waiter({ ok: response.ok, text: response.text });
+      waiter({ ok: response.ok, text: response.text, index: response.index });
     });
 
     socket.on("close", () => {
@@ -71,7 +71,11 @@ export class DaemonClient {
       // handle the caller holds is dead, not merely stale.
       for (const [id, waiter] of this.pending) {
         this.pending.delete(id);
-        waiter({ ok: false, text: "error: daemon connection lost; handles are void" });
+        waiter({
+          ok: false,
+          text: "error: daemon connection lost; handles are void",
+          index: { readiness: "failed" },
+        });
       }
     });
 

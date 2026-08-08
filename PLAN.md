@@ -59,7 +59,7 @@ First verb to mint handles. Two tasks live here that the stub does not mention:
 - [x] byte ↔ LSP position conversion, both encodings
 - [x] address resolution: handle, position, ambiguity → candidates
 - [x] `didChangeWatched` wired via a registry change callback
-- [ ] symbolic addresses (`Widget::count`) — needs `workspace/symbol`
+- [x] symbolic addresses (`Widget::count`) — resolved through `workspace/symbol`
 
 **Done** for handle and position addresses. Against tauroid, `refs` on
 `rgba_to_zrgb` found three references across two files including a cross-crate
@@ -226,6 +226,19 @@ own snapshot internally, so the two can diverge even with no external writer.
 Witness every participating file's generation at validation time and re-check
 it immediately before the rename. The residual stat-to-rename window cannot be
 closed: POSIX has no compare-and-swap rename.
+
+**A witness that re-reads is not a witness.** The corollary, and it survived
+two rounds of review because it looks like the fix rather than a hole in it:
+`witness()` originally took its own snapshot of each participating file, and
+`snapshot()` stats on every call. So `resolve` looked at disk, `locate` looked
+again, and the witness looked a third time — a write landing between any two of
+those is absorbed into the *later* number, after which `recheck` compares the
+new generation against the new generation, agrees with itself, and commits
+bytes spliced from the older buffer. Moving the call earlier only narrows it.
+The fix is to witness the generation each participant was already validated or
+read at, which every one of them carries; then there is no second look to race.
+Generalises past this code: any freshness check whose baseline is re-derived
+rather than carried is checking the wrong thing.
 
 **A schema-invalid request still has an id, and is still owed a reply.**
 Validating the whole envelope at once loses the id along with the bad body, and

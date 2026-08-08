@@ -78,6 +78,19 @@ individually-valid reads are not a coherent snapshot; capture it on entry to a
 collection and re-check on exit. `trace` is the case that needs it most, because
 its conclusion depends on every link holding simultaneously.
 
+**Witness what you validated, never what you can read again.** `snapshot()` is
+read-through and stats on every call, so two reads of one file are two separate
+looks at disk with a window between them. A write that lands in that window is
+absorbed into the second look — so a witness taken by re-reading agrees with
+itself at commit time and waves through bytes spliced from the *first* buffer.
+Every participant already carries the generation it was validated or read at
+(`Full.generation` from `resolve`, `FileSnapshot.generation` from `locate`);
+witnessing that number makes the window zero-width by construction rather than
+narrow, and narrow windows are the ones that only ever fail in production. When
+two participants disagree about one file, the lower stamp wins: disagreement
+means the file moved between their validations, and the earlier stamp is the
+one that makes the recheck say so.
+
 ---
 
 ## 4. What a handle promises — and what it does not

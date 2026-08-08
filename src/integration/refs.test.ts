@@ -23,6 +23,13 @@ describe("refs against a real workspace", { skip }, () => {
     assert.match(res.text, /#\w+ :\d+ run/, res.text);
   });
 
+  test("a symbolic address resolves through the workspace symbol index", async () => {
+    const res = await fx.rpc({ op: "refs", target: "scale" });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /^refs scale [1-9]/, res.text);
+    assert.match(res.text, /src\/main\.rs/, res.text);
+  });
+
   test("refs crosses a crate boundary", async () => {
     // `scale` is declared in the helper crate and used from two files in the
     // root package. Finding those is resolution, not text matching — nothing
@@ -80,6 +87,43 @@ describe("refs against a real workspace", { skip }, () => {
     const res = await fx.rpc({ op: "read", target: "config.toml:3-4" });
     assert.ok(res.ok, res.text);
     assert.match(res.text, /width = 320/, res.text);
+  });
+
+  test("an oversized read becomes a navigable structural overview", async () => {
+    const manyItems = Array.from({ length: 50 }, (_, i) =>
+      `pub fn section_${i}() {\n    let value = ${i};\n    assert_eq!(value, ${i});\n}\n`,
+    ).join("\n");
+    await fx.write("src/overview.rs", manyItems);
+
+    const overview = await fx.rpc({ op: "read", target: "src/overview.rs" });
+    assert.ok(overview.ok, overview.text);
+    assert.match(overview.text, /^overview .*overview\.rs:1-249 — 249 lines, /, overview.text);
+    const section = overview.text.match(/^> (#\w+) :\d+-\d+ fn section_0/m)?.[1];
+    assert.ok(section, overview.text);
+
+    const child = await fx.rpc({ op: "read", target: section });
+    assert.ok(child.ok, child.text);
+    assert.match(child.text, /pub fn section_0/, child.text);
+
+    const forced = await fx.rpc({ op: "read", target: "src/overview.rs", maxLines: -1 });
+    assert.ok(forced.ok, forced.text);
+    assert.match(forced.text, /pub fn section_49/, forced.text);
+  });
+
+  test("an oversized function handle outlines its first-level control flow", async () => {
+    const branches = Array.from({ length: 45 }, (_, i) =>
+      `    if value == ${i} {\n        value += 1;\n    }\n`,
+    ).join("");
+    await fx.write("src/large_function.rs", `pub fn large(mut value: u32) -> u32 {\n${branches}    value\n}\n`);
+
+    const file = await fx.rpc({ op: "read", target: "src/large_function.rs" });
+    const handle = file.text.match(/^> (#\w+) :\d+-\d+ fn large/m)?.[1];
+    assert.ok(handle, file.text);
+
+    const overview = await fx.rpc({ op: "read", target: handle });
+    assert.ok(overview.ok, overview.text);
+    assert.match(overview.text, /^overview .*large_function\.rs:/, overview.text);
+    assert.match(overview.text, /^> #\w+ :\d+-\d+ branch/m, overview.text);
   });
 
   test("the density guard fires on a pathological line", async () => {
