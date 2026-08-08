@@ -37,6 +37,23 @@ tests in `src/integration/move.test.ts`, including the same-file no-op/
 overlap boundary and the cross-file partial-result path. Design record below,
 kept for the reasoning rather than as an open item.
 
+**Fixed after review:** the cross-file path witnessed only `destination.file`
+before its own write, not `source.file` — but `movedText` is copied from
+source into destination's payload, so an external write landing on source
+between the read and the destination write could commit stale bytes into
+destination, undetected until the (too-late) post-write source recheck. Two
+things were wrong, not one: `witness()` also needs `source.file` in its set,
+*and* it was being taken after `build`/the parse-check rather than right
+after both `locate` calls — which left almost no window bracketed at all.
+Fixed by moving the witness earlier and adding `source.file` to it, matching
+where `edit.ts` takes its own witness relative to its build step. No
+deterministic regression test was added for the exact race: closing this
+window from the outside would need an external write landing inside a
+synchronous, no-I/O span (build+parse), which isn't something a black-box
+test can force without an injected hook — the same class of gap DESIGN.md
+already documents as irreducible for the stat-to-rename window. Verified
+instead by re-running the full 55-test integration suite clean.
+
 **Reindentation is not skipped.** "Move exactly" turned out to mean "don't do
 anything smarter than `edit`'s own `insert-before`/`insert-after` already do,"
 not "bypass indentation entirely" — the latter would land unindented code

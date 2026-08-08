@@ -184,6 +184,18 @@ async function moveCrossFile(
   const sourceLocated = await locate(ws, source.file);
   if (sourceLocated === null) return fail(`no grammar for ${source.file}`);
 
+  // Witnessed here, immediately after both reads and before any build work —
+  // not just destination.file. `movedText` below is copied from source into
+  // destination's own payload, so source's freshness is as load-bearing to
+  // this write as destination's is; checking it only via the source handle's
+  // digest (phase 1, above) is not enough, because a digest match tolerates
+  // any change elsewhere in the file, and the recheck below needs to answer
+  // a stricter question: did *this exact snapshot*, the one `movedText` was
+  // sliced from, survive intact all the way to the write. Recheck happens
+  // right before the write, after build+parse, closing the window across
+  // both — the same bracket `edit`'s own witness/recheck pair uses.
+  const destWitness = await witness(ws, [destination.file, source.file], deps);
+
   const movedText = sourceLocated.snap.content.subarray(source.bytes.start, source.bytes.end).toString("utf8");
   const insertSplice = build(destLocated.snap.content, destination, args.action, movedText);
   const nextDest = splice(destLocated.snap.content, insertSplice.range, insertSplice.text);
@@ -195,9 +207,8 @@ async function moveCrossFile(
     }
   }
 
-  // Destination's own recheck: bad here is still a clean, zero-write
-  // rejection, exactly like `edit`'s phase 3 — nothing has been written yet.
-  const destWitness = await witness(ws, [destination.file], deps);
+  // Bad here is still a clean, zero-write rejection, exactly like `edit`'s
+  // phase 3 — nothing has been written yet.
   const destDrift = await recheck(ws, destWitness);
   if (destDrift !== null) {
     return fail(`${destDrift} changed while the move was being prepared; nothing written`);
