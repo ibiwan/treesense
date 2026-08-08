@@ -30,7 +30,7 @@ describe("handle lifecycle", { skip }, () => {
   /** A handle to `fn scale`, minted fresh against current file state. */
   async function scaleHandle(): Promise<string> {
     const amb = await fx.rpc({ op: "refs", target: "crates/helper/src/lib.rs:10" });
-    const ident = amb.text.match(/(#\w+) :\d+ scale/)?.[1];
+    const ident = amb.text.match(/(#\w+) \[[^\]]*\] :\d+ scale/)?.[1];
     assert.ok(ident, `no scale handle in:\n${amb.text}`);
     const res = await fx.rpc({ op: "read", target: ident });
     assert.ok(res.ok, res.text);

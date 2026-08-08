@@ -85,6 +85,28 @@ describe("find", { skip }, () => {
     assert.match(all.text, /pipeline\.rs/, "the unscoped search should have found more");
   });
 
+  test("a directory haystack narrows to that subtree", async () => {
+    // A bare `src` has no extension and no line range, so by shape alone it is
+    // indistinguishable from a symbol — which is exactly what it used to be
+    // refused as. The scope has to come from the filesystem, not the string.
+    const res = await fx.rpc({ op: "find", needle: "scale", haystack: "src" });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /main\.rs|pipeline\.rs/, `should search src/:\n${res.text}`);
+    assert.doesNotMatch(res.text, /crates\//, `crates/ is outside the scope:\n${res.text}`);
+
+    // And the unscoped search must genuinely reach further, or the assertion
+    // above passes for the wrong reason.
+    const all = await fx.rpc({ op: "find", needle: "scale" });
+    assert.match(all.text, /crates\//, `unscoped should reach crates/:\n${all.text}`);
+  });
+
+  test("a directory outside the workspace is not a scope", async () => {
+    // A scope exists to search less. Letting one escape the root would invert
+    // it into a way to search somewhere the caller never opened.
+    const res = await fx.rpc({ op: "find", needle: "scale", haystack: "../.." });
+    assert.equal(res.ok, false, `escaping the root must be refused:\n${res.text}`);
+  });
+
   test("a handle haystack bounds the search to that node", async () => {
     const amb = await fx.rpc({ op: "refs", target: "src/pipeline.rs:9" });
     const run = amb.text.match(/(#\w+) \[[^\]]*::run\] :\d+ run/)?.[1];

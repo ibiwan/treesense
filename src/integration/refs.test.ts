@@ -116,6 +116,29 @@ describe("refs against a real workspace", { skip }, () => {
     assert.ok(child.ok, child.text);
     assert.match(child.text, /pub fn section_0/, child.text);
 
+    // The affordance the file overview actually offers. It lists child handles
+    // but mints none for the file itself, so requiring a "parent overview
+    // handle" here demanded something that never existed — and the caller paid
+    // a rejected call plus a full-source re-read to get around it. The path is
+    // the parent.
+    const pair = [...overview.text.matchAll(/^> (#\w+) \[.*::section_\d+\]/mg)]
+      .slice(0, 2)
+      .map((match) => match[1]!);
+    assert.equal(pair.length, 2, overview.text);
+    const batch = await fx.rpc({ op: "read", target: "src/overview.rs", sections: pair });
+    assert.ok(batch.ok, `a file path is a usable parent scope:\n${batch.text}`);
+    assert.match(batch.text, /^read sections from src\/overview\.rs \(2\)/, batch.text);
+    assert.match(batch.text, /pub fn section_0/, batch.text);
+
+    // Containment still holds: a handle from a different file is refused, so
+    // widening the parent did not turn `sections` into "any handle at all".
+    const elsewhere = await fx.rpc({ op: "refs", target: "src/pipeline.rs:9" });
+    const outsider = elsewhere.text.match(/(#\w+) \[[^\]]*::run\] :\d+ run/)?.[1];
+    assert.ok(outsider, elsewhere.text);
+    const refused = await fx.rpc({ op: "read", target: "src/overview.rs", sections: [outsider] });
+    assert.equal(refused.ok, false, `a handle from another file is not a section:\n${refused.text}`);
+    assert.match(refused.text, /not contained by src\/overview\.rs/, refused.text);
+
     const forced = await fx.rpc({ op: "read", target: "src/overview.rs", maxLines: -1 });
     assert.ok(forced.ok, forced.text);
     assert.match(forced.text, /pub fn section_49/, forced.text);

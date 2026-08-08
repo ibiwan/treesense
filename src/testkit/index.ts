@@ -66,6 +66,13 @@ interface Connection {
 export interface Harness {
   /** Root of the disposable copy. Mutate anything under here. */
   root: string;
+  /**
+   * The daemon's socket when it has one, so a test can point a *second* client
+   * — the MCP facade — at this same daemon instead of letting it autostart one
+   * it would then have no handle on to kill. Null under the stdio fallback,
+   * which the facade cannot dial.
+   */
+  socket: string | null;
   rpc(request: RequestInput): Promise<Reply>;
   /** Overwrite a file inside the copy, relative to its root. */
   write(relative: string, content: string): Promise<void>;
@@ -154,6 +161,7 @@ export async function startFixture(): Promise<Running> {
 
   return {
     root,
+    socket: transport.kind === "unix" ? transport.socket : null,
     rpc,
     write: (relative, content) => writeFile(join(root, relative), content, "utf8"),
     read: (relative) => readFile(join(root, relative), "utf8"),

@@ -65,7 +65,7 @@ Language-specific fully qualified symbol, e.g. `Widget::count`
 | -- | -- |
 | **arguments** | |
 | Needle    | Double-Quoted string to search for |
-| Haystack  | Location Reference (handle \| position) |
+| Haystack  | Location Reference (handle \| position \| directory). A directory is recognised by asking the filesystem, not by its shape — `src` carries no extension and no line range, so nothing about the string distinguishes it from a symbol. Confined to the workspace root: a scope exists to search *less*, and one that escapes the root would invert that. |
 | Mode      | Inferred from the needle's shape; no parameter. A `$VAR` metavariable means an ast-grep pattern, anything else is literal text. A literal zero retries ASCII case-insensitive, then identifier-normalized (`MarineSprite` = `marine_sprite`) matching; the header names any fallback. `collapse` returns one enclosing region per hit cluster for reconnaissance. |
 | **returns** |  |
 | Header | `find "<needle>" text\|pattern <count>` — the reading used is stated, so a misread costs one line rather than a round trip. A trailing `+` means the cap was hit. |
@@ -102,13 +102,13 @@ during cold start.
 | -- | -- |
 | **arguments** | |
 | Target | Handle obtained from `find` or `refs`, or Position |
-| Sections | Optional: up to eight current child handles from a handle target's overview. Returned in request order; each must be contained by that parent. |
+| Sections | Optional: up to eight current child handles listed by the target's overview. Target may be either the handle or the file path that produced it — a whole-file overview mints no handle for the file, so requiring one would name something that never existed. Returned in request order; each must be contained by that target. |
 | Max Lines | Optional. `-1` explicitly requests source rather than an automatic overview. |
 | Max Bytes per Line | Optional density guard for position reads; default 120 (1024 for one line). `-1` explicitly requests source rather than an automatic overview. Calculated average across response, NOT per-line. |
 | **returns** |  |
 | Handle Plus | If handle has changed, this will be the one representing the new version. Prefixed with "changed: " if changed. |
 | Content | All lines to end of response are literal file content with whitespace as-is |
-| Overview | Oversized parsed reads return shallow sections with handles, stable `file::symbol` labels, ranges, kinds and names, plus a recovery instruction and deterministic suggested first sections. Whole files list top-level declarations; large declaration handles list nested declarations or first-level branches/loops. The response identifies the `>120 lines` / `>24 KiB` overview guard. Prefer drilling into a listed handle; `-1` is the explicit raw-source escape hatch. |
+| Overview | Oversized parsed reads return shallow sections with handles, stable `file::symbol` labels, ranges, kinds and names, plus a recovery instruction and deterministic suggested first sections. Whole files list top-level declarations; large declaration handles list nested declarations or first-level branches/loops. The response identifies the `>120 lines` / `>24 KiB` overview guard. Prefer drilling into a listed handle; `-1` is the explicit raw-source escape hatch. Pass several of the listed handles back as `sections` to read them in one call — with `target` set to whatever produced the overview, a file path or a handle, since a whole-file overview mints no handle for the file itself. Sections must lie inside that target. |
 | Error | With description (instead of Handle/Content if target is invalid or maximums are exceeded) |
 
 | OVERVIEW | |

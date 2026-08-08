@@ -23,7 +23,7 @@ describe("edit", { skip }, () => {
   /** A handle to `fn scale`, minted against current state. */
   async function scaleHandle(): Promise<string> {
     const amb = await fx.rpc({ op: "refs", target: "crates/helper/src/lib.rs:10" });
-    const handle = amb.text.match(/(#\w+) :\d+ scale/)?.[1];
+    const handle = amb.text.match(/(#\w+) \[[^\]]*\] :\d+ scale/)?.[1];
     assert.ok(handle, `no scale handle in:\n${amb.text}`);
     return handle;
   }
@@ -61,7 +61,7 @@ describe("edit", { skip }, () => {
     const target = await scaleHandle();
     // `clamp` as a witness: the edit's correctness is declared to depend on it.
     const amb = await fx.rpc({ op: "refs", target: "crates/helper/src/lib.rs:18" });
-    const dep = amb.text.match(/(#\w+) :\d+ clamp/)?.[1];
+    const dep = amb.text.match(/(#\w+) \[[^\]]*\] :\d+ clamp/)?.[1];
     assert.ok(dep, `no clamp handle in:\n${amb.text}`);
 
     // Something else changes the witness out from under the plan.
@@ -116,7 +116,7 @@ describe("edit", { skip }, () => {
     // it — the case that must NOT invalidate, or a sequence of edits above a
     // referent never converges.
     const amb = await fx.rpc({ op: "refs", target: "crates/helper/src/lib.rs:18" });
-    const clamp = amb.text.match(/(#\w+) :\d+ clamp/)?.[1];
+    const clamp = amb.text.match(/(#\w+) \[[^\]]*\] :\d+ clamp/)?.[1];
     assert.ok(clamp);
     const scale = await scaleHandle();
 
@@ -148,7 +148,7 @@ describe("edit", { skip }, () => {
   test("delete reports where the caller now is, not what slid into the gap", async () => {
     // A nested statement, so there is a real enclosing scope to report.
     const amb = await fx.rpc({ op: "refs", target: "crates/helper/src/lib.rs:11" });
-    const stmt = amb.text.match(/(#\w+) :\d+ value/)?.[1];
+    const stmt = amb.text.match(/(#\w+) \[[^\]]*\] :\d+ value/)?.[1];
     assert.ok(stmt, amb.text);
 
     const res = await fx.rpc({ op: "edit", target: stmt, action: "delete" });

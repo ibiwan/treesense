@@ -25,7 +25,7 @@ describe("move", { skip }, () => {
 
   async function handleFor(target: string, name: string): Promise<string> {
     const amb = await fx.rpc({ op: "refs", target });
-    const handle = amb.text.match(new RegExp(`(#\\w+) :\\d+ ${name}`))?.[1];
+    const handle = amb.text.match(new RegExp(`(#\\w+) \\[[^\\]]*\\] :\\d+ ${name}`))?.[1];
     assert.ok(handle, `no ${name} handle in:\n${amb.text}`);
     return handle;
   }

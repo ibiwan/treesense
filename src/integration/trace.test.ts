@@ -18,7 +18,7 @@ describe("trace", { skip }, () => {
   /** Handle for a named identifier on a given line. */
   async function handleFor(where: string, name: string): Promise<string> {
     const amb = await fx.rpc({ op: "refs", target: where });
-    const handle = amb.text.match(new RegExp(`(#\\w+) :\\d+ ${name}\\b`))?.[1];
+    const handle = amb.text.match(new RegExp(`(#\\w+) \\[[^\\]]*\\] :\\d+ ${name}\\b`))?.[1];
     assert.ok(handle, `no ${name} handle in:\n${amb.text}`);
     return handle;
   }

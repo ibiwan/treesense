@@ -12,6 +12,8 @@
  * files themselves. So it works during cold start.
  */
 
+import { stat } from "node:fs/promises";
+
 import { formatLineRange, parseAddress } from "../../shared/address.js";
 import { renderHits } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
@@ -84,7 +86,7 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
 
   const notes: string[] = [];
   if (result.truncated) {
-    notes.push(`… capped at ${MAX_HITS} hits; refine haystack to a file (src/x.rs), range (src/x.rs:10-20), or handle (#...)`);
+    notes.push(`… capped at ${MAX_HITS} hits; refine haystack to a directory (src/), file (src/x.rs), range (src/x.rs:10-20), or handle (#...)`);
   }
   if (scope.unwalked) notes.push("… file limit reached; some files were never searched");
   const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
@@ -394,6 +396,16 @@ async function resolveScope(
     return { files: walked.files, within: null, unwalked: walked.truncated };
   }
 
+  // A directory is a legitimate scope, but nothing about its *shape* says so:
+  // `src` carries no extension and no line range, so it parses as a symbol and
+  // would be refused as "not a scope". Ask the filesystem instead of inferring
+  // from the string — the same reason a bare `README` is a file and not a name.
+  const directory = await asDirectory(ws, haystack);
+  if (directory !== null) {
+    const walked = await walkSource(directory, { grammarsOnly: structural });
+    return { files: walked.files, within: null, unwalked: walked.truncated };
+  }
+
   const address = parseAddress(haystack);
 
   if (address.form === "handle") {
@@ -424,5 +436,25 @@ async function resolveScope(
     return { files: [file], within: { start, end }, unwalked: false };
   }
 
-  return { error: `haystack accepts a file (src/x.rs), range (src/x.rs:10-20), or handle (#...); ${address.symbol} is a symbol, not a scope` };
+  return { error: `haystack accepts a directory (src/), file (src/x.rs), range (src/x.rs:10-20), or handle (#...); ${address.symbol} is a symbol, not a scope` };
+}
+
+/**
+ * The haystack as a directory inside the workspace, or null if it is not one.
+ *
+ * Confined to the root on purpose. A scope exists to search *less*, so a path
+ * that escapes the workspace would quietly invert it into a way to search
+ * somewhere the caller never opened — and `..` is the obvious way to write one
+ * by accident.
+ */
+async function asDirectory(ws: Workspace, haystack: string): Promise<string | null> {
+  // Handles are opaque tokens, never paths; statting one is meaningless and a
+  // file literally named `#317H` must not be able to shadow a live handle.
+  if (haystack.startsWith("#")) return null;
+
+  const path = await ws.files.canonical(haystack);
+  const stats = await stat(path).catch(() => null);
+  if (stats === null || !stats.isDirectory()) return null;
+  if (path !== ws.root && !path.startsWith(`${ws.root}/`)) return null;
+  return path;
 }

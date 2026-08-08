@@ -10,7 +10,7 @@ import {
 } from "../../shared/protocol.js";
 import { handlePlus, stableLabel } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
-import type { ByteRange, FilePath, Full, Handle } from "../../shared/types.js";
+import type { ByteRange, FilePath, Full, Handle, LineRange } from "../../shared/types.js";
 import { locate, mint, type Located } from "../locate.js";
 import type { SyntaxNode } from "../syntax.js";
 import type { Workspace } from "../workspace.js";
@@ -37,31 +37,76 @@ export async function read(ws: Workspace, args: ReadArgs): Promise<Reply> {
   }
 
   if (address.form === "handle") {
-    if (args.sections !== undefined) return readSections(ws, address.handle, args.sections, args);
+    if (args.sections !== undefined) {
+      const parent = await parentFromHandle(ws, address.handle);
+      if ("error" in parent) return err(parent.error);
+      return readSections(ws, parent, args.sections, args);
+    }
     return readHandle(ws, address.handle, args);
   }
 
-  if (args.sections !== undefined) return err("sections requires target to be a parent overview handle");
+  if (args.sections !== undefined) {
+    // A file path is a perfectly good parent scope, and it is the one a caller
+    // naturally has: a whole-file overview lists child handles but mints no
+    // handle for the file itself, so demanding a "parent overview handle" here
+    // named something that never existed. The affordance was the bug, not the
+    // caller — see REVIEW_NOTES.md.
+    const parent = await parentFromPosition(ws, address.path, address.lines);
+    if ("error" in parent) return err(parent.error);
+    return readSections(ws, parent, args.sections, args);
+  }
 
   return readPosition(ws, address.path, address.lines, args);
 }
 
+/**
+ * What `sections` is selected *from*.
+ *
+ * Only ever needed as a file plus a byte range to contain candidates against —
+ * which is why a handle was never actually required, merely the first thing
+ * that happened to supply both.
+ */
+interface Parent {
+  /** How to name it in errors and the response header. */
+  label: string;
+  file: FilePath;
+  bytes: ByteRange;
+}
+
+async function parentFromHandle(ws: Workspace, handle: Handle): Promise<Parent | { error: string }> {
+  const parent = await ws.handles.resolve(handle);
+  if (parent.status === "unknown") return { error: `${handle} unknown — handles do not survive a daemon restart; re-query` };
+  if (parent.status === "gone") return { error: `${handle} gone — its node no longer exists; the plan needs revisiting` };
+  return { label: handle, file: parent.full.file, bytes: parent.full.bytes };
+}
+
+async function parentFromPosition(
+  ws: Workspace,
+  path: string,
+  lines: LineRange | null,
+): Promise<Parent | { error: string }> {
+  const file = await ws.files.canonical(path);
+  const snap = await ws.files.snapshot(file).catch(() => null);
+  if (snap === null) return { error: `${path} could not be read` };
+  const bytes = lines === null
+    ? { start: 0, end: snap.content.length }
+    : snap.index.bytesForLines(lines, snap.content.length);
+  return { label: path, file, bytes };
+}
+
 /** Read several explicitly selected children without turning an overview into a bulk dump. */
-async function readSections(ws: Workspace, parentHandle: Handle, sections: string[], args: ReadArgs): Promise<Reply> {
+async function readSections(ws: Workspace, parent: Parent, sections: string[], args: ReadArgs): Promise<Reply> {
   if (sections.length === 0) return err("sections is empty; omit it to read the target itself");
-  const parent = await ws.handles.resolve(parentHandle);
-  if (parent.status === "unknown") return err(`${parentHandle} unknown — handles do not survive a daemon restart; re-query`);
-  if (parent.status === "gone") return err(`${parentHandle} gone — its node no longer exists; the plan needs revisiting`);
 
   const resolved = [] as Array<{ requested: Handle; full: Full }>;
   for (const requested of sections as Handle[]) {
     const section = await ws.handles.resolve(requested);
     if (section.status === "unknown" || section.status === "gone") return err(`${requested} ${section.status}; re-query the parent overview`);
     const full = section.full;
-    const contained = full.file === parent.full.file
-      && full.bytes.start >= parent.full.bytes.start
-      && full.bytes.end <= parent.full.bytes.end;
-    if (!contained) return err(`${requested} is not contained by ${parentHandle}; sections must come from that overview`);
+    const contained = full.file === parent.file
+      && full.bytes.start >= parent.bytes.start
+      && full.bytes.end <= parent.bytes.end;
+    if (!contained) return err(`${requested} is not contained by ${parent.label}; sections must come from that overview`);
     resolved.push({ requested, full });
   }
 
@@ -87,7 +132,7 @@ async function readSections(ws: Workspace, parentHandle: Handle, sections: strin
     const source = snap.content.subarray(full.bytes.start, full.bytes.end).toString("utf8");
     blocks.push(`section ${requested} ${handlePlus(full, { withPath: true, root: ws.root })}\n${source}`);
   }
-  return { ok: true, text: `read sections from ${parentHandle} (${blocks.length})\n${blocks.join("\n\n")}` };
+  return { ok: true, text: `read sections from ${parent.label} (${blocks.length})\n${blocks.join("\n\n")}` };
 }
 
 async function readHandle(ws: Workspace, handle: Handle, args: ReadArgs): Promise<Reply> {
