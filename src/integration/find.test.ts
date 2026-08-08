@@ -44,6 +44,24 @@ describe("find", { skip }, () => {
     assert.match(res.text, /runs_to_completion/, res.text);
   });
 
+  test("collapsed reconnaissance returns one enclosing region per hit cluster", async () => {
+    const raw = await fx.rpc({ op: "find", needle: "scale" });
+    const collapsed = await fx.rpc({ op: "find", needle: "scale", collapse: true });
+    assert.ok(collapsed.ok, collapsed.text);
+    assert.match(collapsed.text, /^find "scale" text collapsed /, collapsed.text);
+
+    const count = (text: string) => (text.match(/fn run/g) ?? []).length;
+    assert.ok(count(raw.text) > 1, raw.text);
+    assert.equal(count(collapsed.text), 1, collapsed.text);
+  });
+
+  test("collapsed reconnaissance retains the containing declaration as provenance", async () => {
+    await fx.write("src/provenance.rs", "struct Marine;\nimpl Marine {\n    fn tick(&self) {\n        let marker = 1;\n    }\n}\n");
+    const res = await fx.rpc({ op: "find", needle: "marker", collapse: true });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /fn Marine::tick > #\w+ \[provenance\.rs::Marine\] .*impl Marine/, res.text);
+  });
+
   test("a structural pattern matches by shape, not by spelling", async () => {
     // Two call sites with different arguments — `scale(seed, step)` and
     // `scale(seed + 1, step)`. No literal string matches both.
@@ -69,7 +87,7 @@ describe("find", { skip }, () => {
 
   test("a handle haystack bounds the search to that node", async () => {
     const amb = await fx.rpc({ op: "refs", target: "src/pipeline.rs:9" });
-    const run = amb.text.match(/(#\w+) :\d+ run/)?.[1];
+    const run = amb.text.match(/(#\w+) \[[^\]]*::run\] :\d+ run/)?.[1];
     assert.ok(run, amb.text);
 
     const res = await fx.rpc({ op: "find", needle: "scale", haystack: run });

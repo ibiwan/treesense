@@ -24,6 +24,7 @@ import type { Workspace } from "../workspace.js";
 export interface FindArgs {
   needle: string;
   haystack?: string | undefined;
+  collapse: boolean;
 }
 
 /** A search is not an inventory; past this the answer stops being readable. */
@@ -77,15 +78,19 @@ export async function find(ws: Workspace, args: FindArgs): Promise<Reply> {
     }
   }
 
-  const header = `find ${JSON.stringify(needle)} ${reading} ${result.total}${result.truncated || scope.unwalked ? "+" : ""}`;
+  if (args.collapse) result = collapseResults(result);
+
+  const header = `find ${JSON.stringify(needle)} ${reading}${args.collapse ? " collapsed" : ""} ${result.total}${result.truncated || scope.unwalked ? "+" : ""}`;
 
   const notes: string[] = [];
-  if (result.truncated) notes.push(`… capped at ${MAX_HITS} hits; narrow with haystack`);
+  if (result.truncated) {
+    notes.push(`… capped at ${MAX_HITS} hits; refine haystack to a file (src/x.rs), range (src/x.rs:10-20), or handle (#...)`);
+  }
   if (scope.unwalked) notes.push("… file limit reached; some files were never searched");
   const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
 
   if (result.total === 0) return { ok: true, text: `${header}${note}` };
-  return { ok: true, text: `${header}\n${renderHits(result.groups)}${note}` };
+  return { ok: true, text: `${header}\n${renderHits(result.groups, ws.root)}${note}` };
 }
 
 type LiteralReading = "text" | "text (case-insensitive fallback)" | "text (normalized fallback)";
@@ -95,6 +100,36 @@ interface MatchResults {
   groups: Map<string, Hit[]>;
   total: number;
   truncated: boolean;
+}
+
+/**
+ * Reconnaissance needs regions, not every spelling inside them. Keep the
+ * nearest enclosing declaration as the stable handle, plus one containing
+ * declaration/module when available, and retain the first matching line as
+ * evidence.
+ */
+function collapseResults(result: MatchResults): MatchResults {
+  const groups = new Map<string, Hit[]>();
+  let total = 0;
+  for (const [file, hits] of result.groups) {
+    const seen = new Set<string>();
+    const collapsed: Hit[] = [];
+    for (const hit of hits) {
+      const itemIndex = hit.hierarchy.findIndex((full) => isItemKind(full.kind));
+      const regionIndex = itemIndex === -1 ? hit.hierarchy.length - 1 : itemIndex;
+      const region = hit.hierarchy[regionIndex]!;
+      const key = `${region.file}:${region.bytes.start}:${region.bytes.end}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const context = hit.hierarchy[regionIndex + 1];
+      collapsed.push({ hierarchy: context === undefined ? [region] : [region, context], snippet: hit.snippet });
+    }
+    if (collapsed.length > 0) {
+      groups.set(file, collapsed);
+      total += collapsed.length;
+    }
+  }
+  return { groups, total, truncated: result.truncated };
 }
 
 async function collectMatches(
@@ -308,10 +343,11 @@ function hitAt(ws: Workspace, located: Located, offset: number): Hit | null {
   if (node === null) return null;
 
   const chain: Full[] = [mint(ws, located, node)];
+  let itemCount = 0;
   for (const ancestor of located.tree.ancestors(node)) {
     if (!INTERESTING.has(ancestor.kind)) continue;
     chain.push(mint(ws, located, ancestor));
-    if (isItemKind(ancestor.kind)) break;
+    if (isItemKind(ancestor.kind) && ++itemCount === 2) break;
   }
 
   const line = located.snap.index.lineAt(offset);
@@ -374,13 +410,12 @@ async function resolveScope(
 
   if (address.form === "position") {
     const file = await ws.files.canonical(address.path);
+    const snap = await ws.files.snapshot(file).catch(() => null);
+    if (snap === null) return { error: `${address.path} could not be read; haystack accepts a file (src/x.rs), range (src/x.rs:10-20), or handle (#...)` };
     if (address.lines === null) return { files: [file], within: null, unwalked: false };
 
     // Line bounds come from the snapshot, not the parse — a range in a file
     // with no grammar is still a perfectly good range.
-    const snap = await ws.files.snapshot(file).catch(() => null);
-    if (snap === null) return { error: `${address.path} could not be read` };
-
     const start = snap.index.startOfLine(address.lines.start);
     const end =
       address.lines.end >= snap.index.lineCount
@@ -389,5 +424,5 @@ async function resolveScope(
     return { files: [file], within: { start, end }, unwalked: false };
   }
 
-  return { error: `haystack must be a file or handle, not a symbol (${address.symbol})` };
+  return { error: `haystack accepts a file (src/x.rs), range (src/x.rs:10-20), or handle (#...); ${address.symbol} is a symbol, not a scope` };
 }

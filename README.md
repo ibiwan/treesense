@@ -26,10 +26,25 @@ MCP client ──stdio──▶ mcp-fluent          thin, per-session, stateless
 
 Handles die when the daemon dies, not when a client disconnects.
 
+## Handles
+
+Handles are opaque source-region identities returned by `find`, `refs`, and a
+large-read overview. Echo them back rather than constructing them. A handle
+survives a source insertion above it when its bytes are unchanged; if its own
+bytes changed, `read` may return a replacement handle prefixed `changed:`, and
+if it cannot be recovered it is `gone`. `edit` and `move` take handles only;
+their `deps` list names every other handle whose unchanged state the operation
+assumes.
+
+Rendered handles pair that opaque identity with a stable human label, for
+example `#6B [frame_loop.rs::tick]`. Results use project-relative paths, so a
+handle-bearing line is also a compact human citation.
+
 ## Verbs
 
 | | |
 |---|---|
+| `overview` | bounded source tree, manifests, and heuristic entry-like files; needs no index |
 | `find`  | search; returns hits grouped by file and enclosing item |
 | `read`  | source when compact; a handle-bearing structural overview when large |
 | `refs`  | references to a symbol; blocks on the index |
@@ -44,7 +59,7 @@ columns.
 
 ## Status
 
-All six verbs are implemented: `read`, `refs`, `edit`, `find`, `move`, `trace`. Also
+All seven verbs are implemented: `overview`, `read`, `refs`, `edit`, `find`, `move`, `trace`. Also
 in place: addresses; the file registry with generations and lazy staleness;
 the handle table including rebasing, identity-based relocation and the
 `changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the ast-grep syntax
@@ -73,6 +88,21 @@ npm run dev:mcp           # facade; autostarts the daemon if absent
 `FLUENT_ROOT` overrides the workspace root, `FLUENT_TARGET_DIR` gives
 rust-analyzer its own `target/` so cargo's exclusive lock is never contended
 with the editor's instance.
+
+## Suggested flow
+
+Start with `overview`, then use `find({ needle: "term", collapse: true })`.
+Read a returned handle to drill in. `find` and `read` work while the semantic
+index warms; `refs` and `trace` wait automatically. A capped `find` response
+names the accepted `haystack` refinements: a file, line range, or handle.
+
+When a large handle becomes an overview, select several listed children in one
+call with `read({ target: "#parent", sections: ["#child1", "#child2"] })`.
+The children must still be current and inside that parent; their request order
+is preserved, and oversized children remain summaries rather than becoming a
+bulk source dump.
+- Add a lightweight project map: roots, languages, build files, index state,
+  and LSP availability.
 
 ## Two invariants worth not breaking
 

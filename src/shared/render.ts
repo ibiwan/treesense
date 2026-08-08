@@ -11,21 +11,29 @@
  * no alignment padding.
  */
 
+import { basename, relative } from "node:path";
+
 import { formatLineRange, formatSize } from "./address.js";
 import type { Full, Hit, Site } from "./types.js";
 
-/** `#317H :35-37 fn Square::area` — Handle, Range, Size, Description. */
-export function handlePlus(full: Full, opts: { withPath?: boolean } = {}): string {
-  const parts: string[] = [full.handle];
+/** `#317H [shapes.rs::Square::area] :35-37 fn Square::area` — stable label plus address. */
+export function handlePlus(full: Full, opts: { withPath?: boolean; root?: string | undefined } = {}): string {
+  const parts: string[] = [full.handle, `[${stableLabel(full)}]`];
 
   const range = formatLineRange(full.lines);
-  parts.push(opts.withPath === true ? `${full.file}${range}` : range);
+  const path = opts.root === undefined ? full.file : relative(opts.root, full.file);
+  parts.push(opts.withPath === true ? `${path}${range}` : range);
 
   const size = formatSize(full.bytes.end - full.bytes.start, lineCount(full));
   if (size !== null) parts.push(size);
 
   parts.push(describe(full));
   return parts.join(" ");
+}
+
+/** A short, deterministic label lets an agent recognize a handle across calls. */
+export function stableLabel(full: Full): string {
+  return `${basename(full.file)}::${full.qualified ?? full.symbol ?? full.kind}`;
 }
 
 /** `fn Square::area` — Type plus fully-qualified name where one exists. */
@@ -41,20 +49,20 @@ export function describe(full: Full): string {
  * nesting is fine, but counting depth is exactly the kind of character
  * arithmetic models get wrong. A chain needs no spatial inference.
  */
-export function hierarchy(chain: Full[]): string {
-  return chain.map((full) => `> ${handlePlus(full)}`).join(" ");
+export function hierarchy(chain: Full[], root?: string): string {
+  return chain.map((full) => `> ${handlePlus(full, { root })}`).join(" ");
 }
 
-export function renderHit(hit: Hit): string {
-  return `${hierarchy(hit.hierarchy)}\n  ${hit.snippet}`;
+export function renderHit(hit: Hit, root?: string): string {
+  return `${hierarchy(hit.hierarchy, root)}\n  ${hit.snippet}`;
 }
 
 /** Hits grouped by file, so each path is written once however many hits it holds. */
-export function renderHits(groups: Map<string, Hit[]>): string {
+export function renderHits(groups: Map<string, Hit[]>, root?: string): string {
   const out: string[] = [];
   for (const [file, hits] of groups) {
-    out.push(file);
-    for (const hit of hits) out.push(renderHit(hit));
+    out.push(root === undefined ? file : relative(root, file));
+    for (const hit of hits) out.push(renderHit(hit, root));
   }
   return out.join("\n");
 }
@@ -66,8 +74,8 @@ export function renderHits(groups: Map<string, Hit[]>): string {
  * not follow a value must never be indistinguishable from one that genuinely
  * ended: the model reads a short tree as a complete answer either way.
  */
-export function renderSite(site: Site): string {
-  const head = `${site.direction} ${site.distance} ${handlePlus(site.full, { withPath: true })}`;
+export function renderSite(site: Site, root?: string): string {
+  const head = `${site.direction} ${site.distance} ${handlePlus(site.full, { withPath: true, root })}`;
   return site.stop === null ? head : `${head} stop:${site.stop}`;
 }
 

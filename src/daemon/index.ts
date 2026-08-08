@@ -22,6 +22,7 @@ import { socketPathFor } from "../shared/socket.js";
 import { edit } from "./actions/edit.js";
 import { find } from "./actions/find.js";
 import { move } from "./actions/move.js";
+import { overview } from "./actions/overview.js";
 import { read } from "./actions/read.js";
 import { refs } from "./actions/refs.js";
 import { trace } from "./actions/trace.js";
@@ -44,6 +45,8 @@ async function dispatch(ws: Workspace, request: Request): Promise<Reply> {
       return move(ws, request);
     case "trace":
       return trace(ws, request);
+    case "overview":
+      return overview(ws);
     case "status":
       return {
         ok: true,

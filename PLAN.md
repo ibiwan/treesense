@@ -25,9 +25,11 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | 🚧 | **M7** use it against a real workload and measure |
 | ✅ | `move` — relocate a handle's bytes before/after another handle, same-file or cross-file (added post-M6, see REVIEW_NOTES.md) |
 
-All six verbs are implemented and exercised. What remains untested is the
-premise itself: M7 measures whether this actually costs fewer tokens than
-`grep` and `cat`, which no amount of unit testing can establish.
+All six verbs are implemented and exercised. A first qualitative Tauroid run
+confirmed the navigation workflow is less noisy than `grep` plus `cat`; M7
+still needs a measured comparison of tool calls, bytes returned, successful
+target selection and retries before the token-efficiency premise is a claim
+rather than an observation.
 
 ## M1 — syntax layer
 

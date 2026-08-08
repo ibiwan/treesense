@@ -82,7 +82,7 @@ export async function trace(ws: Workspace, args: TraceArgs): Promise<Reply> {
     `${sites.length}${capped ? "+" : ""} ws${after}${stale}${cap}`;
 
   if (sites.length === 0) return { ok: true, text: `${header}\n(no flow found)` };
-  return { ok: true, text: [header, ...sites.map(renderSite)].join("\n") };
+  return { ok: true, text: [header, ...sites.map((site) => renderSite(site, ws.root))].join("\n") };
 }
 
 async function walk(

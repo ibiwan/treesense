@@ -113,7 +113,7 @@ async function moveSameFile(
     return fail("destination lands inside the source being moved");
   }
   if (point === source.bytes.start || point === source.bytes.end) {
-    return { ok: true, text: `${handlePlus(source, { withPath: true })} unchanged — destination is adjacent to source` };
+    return { ok: true, text: `${handlePlus(source, { withPath: true, root: ws.root })} unchanged — destination is adjacent to source` };
   }
 
   // Both participants vouch for the generation their own phase-1 validation
@@ -243,7 +243,7 @@ async function moveCrossFile(
   const freshDest = await locate(ws, destination.file);
   const introduced = freshDest === null ? null : outcome(freshDest, insertSplice.contentAt, args.action);
   const newHandle = freshDest !== null && introduced !== null ? mint(ws, freshDest, introduced) : null;
-  const inserted = newHandle === null ? `${destination.file} ok` : handlePlus(newHandle, { withPath: true });
+  const inserted = newHandle === null ? `${destination.file} ok` : handlePlus(newHandle, { withPath: true, root: ws.root });
 
   // The destination write already landed — from here on, a bad verdict is a
   // *partial* result, not a clean rejection. No automatic reversal write is
@@ -317,7 +317,7 @@ async function report(
   const fresh: Located | null = await locate(ws, file);
   const introduced = fresh === null ? null : outcome(fresh, contentAt, action);
   const summary =
-    fresh === null || introduced === null ? `${file} ok` : handlePlus(mint(ws, fresh, introduced), { withPath: true });
+    fresh === null || introduced === null ? `${file} ok` : handlePlus(mint(ws, fresh, introduced), { withPath: true, root: ws.root });
 
   const killed = killedRaw.filter((h) => h !== sourceHandle);
   const lines = [summary];

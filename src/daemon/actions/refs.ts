@@ -20,7 +20,7 @@
  */
 
 import { formatLineRange, parseAddress } from "../../shared/address.js";
-import { renderHits } from "../../shared/render.js";
+import { renderHits, stableLabel } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
 import type { FilePath, Full, Hit } from "../../shared/types.js";
 import {
@@ -80,7 +80,7 @@ export async function refs(ws: Workspace, args: RefsArgs): Promise<Reply> {
   }
 
   const header = `refs ${node.text()} ${locations.length} ws${ws.files.workspaceGen}`;
-  return { ok: true, text: `${header}\n${renderHits(groups)}` };
+  return { ok: true, text: `${header}\n${renderHits(groups, ws.root)}` };
 }
 
 /**
@@ -253,7 +253,7 @@ function candidates(
         : item === null
           ? ""
           : `in ${describeItem(item)}`;
-    return `${full.handle} :${full.lines.start} ${node.text()}${context === "" ? "" : `  ${context}`}`;
+    return `${full.handle} [${stableLabel(full)}] :${full.lines.start} ${node.text()}${context === "" ? "" : `  ${context}`}`;
   });
 
   // Every candidate on one line means one shared snippet rather than the same
@@ -271,7 +271,7 @@ function symbolicCandidates(ws: Workspace, symbol: string, found: Anchor[]): Rep
     const declaration = declares(located.tree, node) ?? located.tree.enclosingItem(node);
     const full = mint(ws, located, declaration ?? node);
     const qualified = declaration === null ? null : qualifiedName(located.tree, declaration);
-    return `${full.handle} ${full.file}:${full.lines.start} ${qualified ?? node.text()}`;
+    return `${full.handle} [${stableLabel(full)}] ${full.file}:${full.lines.start} ${qualified ?? node.text()}`;
   });
   return {
     ok: true,

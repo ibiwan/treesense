@@ -139,7 +139,7 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   const summary =
     fresh === null || introduced === null
       ? `${target.full.file}:${snap.index.lineAt(splice.contentAt)} ok`
-      : handlePlus(mint(ws, fresh, introduced), { withPath: true });
+      : handlePlus(mint(ws, fresh, introduced), { withPath: true, root: ws.root });
 
   const dead = killed.filter((handle) => handle !== address.handle);
   const lines = [summary];

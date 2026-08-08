@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fluent": {
+      "command": "node",
+      "args": ["/Users/jkent/Documents/git/mcp-fluent/dist/mcp/index.js"],
+      "env": {
+        "FLUENT_ROOT": "/Users/jkent/Documents/git/tauroid",
+        "PATH": "/Users/jkent/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

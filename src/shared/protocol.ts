@@ -15,11 +15,15 @@ export const FindRequest = z.object({
   op: z.literal("find"),
   needle: z.string().min(1),
   haystack: z.string().optional(),
+  /** One enclosing region per hit cluster, for reconnaissance rather than edits. */
+  collapse: z.boolean().default(false),
 });
 
 export const ReadRequest = z.object({
   op: z.literal("read"),
   target: z.string().min(1),
+  /** Exact child handles chosen from a parent overview; returned in request order. */
+  sections: z.array(z.string().regex(/^#/)).max(8).optional(),
   maxLines: z.number().int().optional(),
   /**
    * Average bytes per line across the response, not a per-line cap: one long
@@ -74,6 +78,7 @@ export const TraceRequest = z.object({
   maxDown: z.number().int().default(3),
 });
 
+export const OverviewRequest = z.object({ op: z.literal("overview") });
 export const StatusRequest = z.object({ op: z.literal("status") });
 
 export const Request = z.discriminatedUnion("op", [
@@ -83,6 +88,7 @@ export const Request = z.discriminatedUnion("op", [
   EditRequest,
   MoveRequest,
   TraceRequest,
+  OverviewRequest,
   StatusRequest,
 ]);
 export type Request = z.infer<typeof Request>;
