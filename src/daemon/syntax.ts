@@ -119,6 +119,203 @@ const KIND_MAP: Record<Language, Record<string, NodeKind>> = {
   tsx: {},
 };
 
+/**
+ * Decoration vocabulary, per grammar. Used to answer one question: which single
+ * name does an expression denote?
+ *
+ * `trace` is a name tracer. `&mut x`, `(x)`, `x?` and `x.clone()` are all still
+ * x as far as a name is concerned, and refusing to see through them stops a
+ * trace at the first borrow — which in Rust is roughly immediately. The rules
+ * are syntactic and identical across languages; only these token sets differ,
+ * which is what keeps the traversal one implementation rather than four.
+ */
+interface PeelTable {
+  /** Single-operand wrappers. The operand is the last named child. */
+  readonly wrappers: ReadonlySet<string>;
+  /** Dotted/scoped access. The value is the rightmost segment. */
+  readonly paths: ReadonlySet<string>;
+  readonly call: string;
+  readonly args: string;
+  /** Binds a name to a value: the name comes first, the value last. */
+  readonly binding: ReadonlySet<string>;
+  /** Explicit return. The returned value is the last named child. */
+  readonly returns: ReadonlySet<string>;
+}
+
+const RUST_PEEL: PeelTable = {
+  wrappers: new Set([
+    "reference_expression", // &x, &mut x
+    "unary_expression", // *x, -x
+    "parenthesized_expression",
+    "try_expression", // x?
+    "await_expression",
+  ]),
+  paths: new Set(["field_expression", "scoped_identifier"]),
+  call: "call_expression",
+  args: "arguments",
+  binding: new Set(["let_declaration"]),
+  returns: new Set(["return_expression"]),
+};
+
+const TS_PEEL: PeelTable = {
+  wrappers: new Set([
+    "parenthesized_expression",
+    "await_expression",
+    "non_null_expression", // x!
+    "unary_expression",
+    "spread_element", // ...x
+    "as_expression", // x as T
+    "satisfies_expression",
+  ]),
+  paths: new Set(["member_expression"]),
+  call: "call_expression",
+  args: "arguments",
+  binding: new Set(["variable_declarator"]),
+  returns: new Set(["return_statement"]),
+};
+
+const PEEL: Record<Language, PeelTable> = {
+  rust: RUST_PEEL,
+  typescript: TS_PEEL,
+  javascript: TS_PEEL,
+  tsx: TS_PEEL,
+};
+
+/** Runaway guard: real decoration nests a few deep, never dozens. */
+const MAX_PEEL = 12;
+
+/**
+ * The single identifier an expression denotes, or null when it denotes no one
+ * name — `a + b`, a literal, a call with arguments.
+ *
+ * Null is a real answer and the caller must report it. Guessing a name out of
+ * `seed + 1` would make the trace claim a flow the syntax does not support.
+ */
+export function principalName(lang: Language, node: SyntaxNode): SyntaxNode | null {
+  const table = PEEL[lang];
+  let cur: SyntaxNode | null = node;
+
+  for (let depth = 0; cur !== null && depth < MAX_PEEL; depth++) {
+    if (cur.kind === "ident") return cur;
+    const raw = cur.rawKind;
+
+    if (table.wrappers.has(raw)) {
+      cur = cur.children().at(-1) ?? null;
+      continue;
+    }
+
+    // A zero-argument method continues the value's story under a different
+    // type: `x.clone()`, `x.to_string()`, `x.toString()`. The value is the
+    // RECEIVER, not the method name — so this must be tested before the path
+    // rule below, which would otherwise hand back `clone`.
+    if (raw === table.call) {
+      const kids: SyntaxNode[] = cur.children();
+      const callee: SyntaxNode | undefined = kids[0];
+      const args: SyntaxNode | undefined = kids[1];
+      if (callee === undefined) return null;
+      // Any argument means the result is computed from more than the receiver.
+      if (args?.rawKind === table.args && args.children().length > 0) return null;
+      if (!table.paths.has(callee.rawKind)) return null;
+      cur = callee.children()[0] ?? null;
+      continue;
+    }
+
+    if (table.paths.has(raw)) {
+      cur = cur.children().at(-1) ?? null;
+      continue;
+    }
+
+    return null;
+  }
+  return null;
+}
+
+/**
+ * If this identifier is the name a binding introduces, the expression it is
+ * bound to. `let pose = draw_pose(..)` asked about `pose` gives the call.
+ *
+ * The name-first/value-last shape holds across every language in the table, so
+ * an optional type annotation or a `mut` in between costs nothing.
+ */
+export function boundValue(lang: Language, node: SyntaxNode): SyntaxNode | null {
+  const parent = node.parent;
+  if (parent === null || !PEEL[lang].binding.has(parent.rawKind)) return null;
+
+  const value = parent.children().at(-1);
+  if (value === undefined) return null;
+  // Asked about the value rather than the name: that is not a binding edge.
+  if (value.bytes.start <= node.bytes.start) return null;
+  return value;
+}
+
+/**
+ * Every expression whose value leaves this function: the tail expression, plus
+ * anything explicitly returned.
+ *
+ * A tail that is a statement is not a value — `fn f() { g(); }` returns unit,
+ * and reporting `g()` as its return would invent a flow.
+ */
+export function returnValues(lang: Language, fn: SyntaxNode): SyntaxNode[] {
+  const table = PEEL[lang];
+  const out: SyntaxNode[] = [];
+
+  const body = fn.children().find((c) => c.kind === "block");
+  if (body === undefined) return out;
+
+  const tail = body.children().at(-1);
+  if (tail !== undefined && tail.kind !== "stmt") out.push(tail);
+
+  const walk = (node: SyntaxNode, depth: number): void => {
+    if (depth > 40) return;
+    if (table.returns.has(node.rawKind)) {
+      const value = node.children().at(-1);
+      if (value !== undefined) out.push(value);
+      return;
+    }
+    // A nested function's returns belong to it, not to us.
+    if (depth > 0 && node.kind === "fn") return;
+    for (const child of node.children()) walk(child, depth + 1);
+  };
+  walk(body, 0);
+
+  return out;
+}
+
+/**
+ * Inverse of `boundValue`: the name a binding gives to this value expression,
+ * looking through any decoration between them (`let x = f()?`).
+ */
+export function boundName(lang: Language, value: SyntaxNode): SyntaxNode | null {
+  const table = PEEL[lang];
+  let cur: SyntaxNode = value;
+  for (let depth = 0; depth < MAX_PEEL; depth++) {
+    const parent: SyntaxNode | null = cur.parent;
+    if (parent === null) return null;
+    if (table.binding.has(parent.rawKind)) {
+      const kids = parent.children();
+      // Only the bound value carries the name; an argument inside it does not.
+      if (kids.at(-1)?.bytes.start !== cur.bytes.start) return null;
+      // First identifier, so `let mut x` and `let x: T` both land on `x`.
+      return kids.find((k) => k.kind === "ident") ?? null;
+    }
+    if (!table.wrappers.has(parent.rawKind)) return null;
+    cur = parent;
+  }
+  return null;
+}
+
+/** Peel decoration off an expression to the call underneath, if there is one. */
+export function callWithin(lang: Language, node: SyntaxNode): SyntaxNode | null {
+  const table = PEEL[lang];
+  let cur: SyntaxNode | null = node;
+  for (let depth = 0; cur !== null && depth < MAX_PEEL; depth++) {
+    if (cur.rawKind === table.call) return cur;
+    if (!table.wrappers.has(cur.rawKind)) return null;
+    cur = cur.children().at(-1) ?? null;
+  }
+  return null;
+}
+
 /** Kinds that count as declarations for `item` scope. */
 const ITEM_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
   "fn",

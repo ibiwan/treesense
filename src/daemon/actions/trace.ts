@@ -4,11 +4,22 @@
  * The only verb nothing off the shelf already does, and it needs no new
  * engine: references, plus definition, plus a tree-walk, in a loop.
  *
- *   down: for each use, if the symbol is passed as a BARE IDENTIFIER
- *         argument, resolve the callee, match the parameter by position, and
- *         recurse from there.
+ *   down: for each use, if the symbol is the name an argument DENOTES, resolve
+ *         the callee, match the parameter by position, and recurse. Plus the
+ *         other direction values travel: out through the return, into the
+ *         caller's binding.
  *   up:   the same machinery inverted — references on the enclosing function,
- *         filtered to call sites, taking the argument in that slot.
+ *         filtered to call sites, taking the argument in that slot; and a name
+ *         bound from a call resolves back to what that call returns.
+ *
+ * This is a NAME tracer. `&mut x`, `(x)`, `x?` and `x.clone()` all denote x, so
+ * decoration is peeled before asking what an expression names (see
+ * `principalName`). Refusing to see through a borrow stops a Rust trace almost
+ * immediately, which is a false negative dressed as an answer.
+ *
+ * What it will not do is invent a name where the syntax gives none: `f(x + 1)`
+ * and a `value * factor` tail stop, with a reason, rather than guessing which
+ * operand mattered.
  *
  * The requirement that makes it trustworthy: EVERY terminated branch states
  * why it stopped. A branch that halted at a macro must never be
@@ -16,10 +27,10 @@
  * short tree as a complete answer either way.
  *
  * DELIBERATELY NAIVE. Out of scope, and visible in the output rather than by
- * omission: borrows and aliasing (`&mut x` reads as a non-identifier
- * argument), destructuring, method receivers, struct fields, closure captures,
- * and trait dispatch where the impl is not statically known. Those need real
- * dataflow over MIR. What is here is syntactic, and says so.
+ * omission: aliasing, destructuring, method receivers (a receiver is not yet
+ * parameter zero), closure captures, and trait dispatch where the impl is not
+ * statically known. Those need real dataflow over MIR. What is here is
+ * syntactic, and says so.
  */
 
 import { parseAddress } from "../../shared/address.js";
@@ -29,7 +40,15 @@ import type { FilePath, Site, StopReason } from "../../shared/types.js";
 import { locate, mint, questionNode, type Located } from "../locate.js";
 import { pathToUri, uriToPath } from "../lsp.js";
 import { byteToPosition, positionToByte } from "../positions.js";
-import type { SyntaxNode } from "../syntax.js";
+import {
+  boundName,
+  boundValue,
+  callWithin,
+  principalName,
+  returnValues,
+  type Language,
+  type SyntaxNode,
+} from "../syntax.js";
 import type { Workspace } from "../workspace.js";
 
 export interface TraceArgs {
@@ -185,8 +204,14 @@ async function stepDown(ws: Workspace, from: Frontier): Promise<Step[]> {
       continue;
     }
 
-    const slot = argumentSlot(node);
-    if (slot === null) continue; // not in argument position — not a flow edge
+    const slot = argumentSlot(located.tree.language, node);
+    if (slot === null) {
+      // Not an argument, but it may still leave its function by return. The
+      // check has to run per USE: the declaration of `carried` and the
+      // `*carried` that returns it are the same symbol at different bytes.
+      out.push(...(await stepDownThroughReturn(ws, here)));
+      continue;
+    }
     if (!slot.bare) {
       out.push({ at: here, stop: "non-ident-arg" });
       continue;
@@ -203,6 +228,63 @@ async function stepDown(ws: Workspace, from: Frontier): Promise<Step[]> {
 }
 
 /**
+ * Follow the value out through the return, into the caller's binding.
+ *
+ * Arguments carry values in; returns carry them out. Following only arguments
+ * loses every `let x = f(..)` — which in a data pipeline is most of it.
+ */
+async function stepDownThroughReturn(ws: Workspace, from: Frontier): Promise<Step[]> {
+  const lang = from.located.tree.language;
+  const fn = enclosingFn(from.located, from.node);
+  if (fn === null) return [];
+
+  // Only the name the return expression DENOTES leaves the function. In
+  // `value * factor` neither name does, on the same rule that stops the walk
+  // at `scale(seed + 1, ..)`.
+  const leaves = returnValues(lang, fn).some((expr) => {
+    const name = principalName(lang, expr);
+    return name !== null && name.bytes.start === from.node.bytes.start;
+  });
+  if (!leaves) return [];
+
+  const fnName = fn.nameNode;
+  if (fnName === null) return [{ at: from, stop: "unresolved" }];
+
+  const position = byteToPosition(from.located.snap, fnName.bytes.start, ws.lsp.positionEncoding);
+  const callers = await ws.lsp.references(pathToUri(from.located.snap.path), position);
+
+  const out: Step[] = [];
+  for (const caller of callers) {
+    const file = (await ws.files.canonical(uriToPath(caller.uri))) as FilePath;
+    const located = await locate(ws, file);
+    if (located === null) continue;
+
+    const offset = positionToByte(located.snap, caller.range.start, ws.lsp.positionEncoding);
+    const node = located.tree.nodeAt(offset);
+    if (node === null) continue;
+
+    const call = enclosingCall(node);
+    if (call === null) continue; // a mention that is not a call
+
+    const bound = boundName(located.tree.language, call);
+    if (bound === null) {
+      // Used inline — `f(g(x))`, `total += g(x)`. The value does leave, but it
+      // never acquires a name here for the walk to continue from.
+      out.push({ at: { located, node: call, distance: from.distance }, stop: "return" });
+      continue;
+    }
+    out.push({ to: { located, node: bound, distance: from.distance } });
+  }
+
+  // We established the value leaves by return. Finding no caller to hand it to
+  // is a failure to resolve, not an ending — returning nothing here would let
+  // an unindexed file read as "the value stops here", which is the one thing
+  // this verb must never say by accident.
+  if (out.length === 0) return [{ at: from, stop: "return" }];
+  return out;
+}
+
+/**
  * Follow the value back to the arguments that supply it.
  *
  * Where the symbol is a parameter, find its position, then look at every call
@@ -210,7 +292,7 @@ async function stepDown(ws: Workspace, from: Frontier): Promise<Step[]> {
  */
 async function stepUp(ws: Workspace, from: Frontier): Promise<Step[]> {
   const slot = parameterSlot(from.located, from.node);
-  if (slot === null) return [];
+  if (slot === null) return stepUpThroughBinding(ws, from);
 
   const fnName = slot.fn.nameNode;
   if (fnName === null) return [{ at: from, stop: "unresolved" }];
@@ -237,41 +319,84 @@ async function stepUp(ws: Workspace, from: Frontier): Promise<Step[]> {
       continue;
     }
 
-    const here: Frontier = { located, node: actual, distance: from.distance };
-    if (actual.kind !== "ident") {
-      out.push({ at: here, stop: "non-ident-arg" });
+    const named = principalName(located.tree.language, actual);
+    if (named === null) {
+      out.push({ at: { located, node: actual, distance: from.distance }, stop: "non-ident-arg" });
       continue;
     }
-    out.push({ to: here });
+    out.push({ to: { located, node: named, distance: from.distance } });
   }
   return out;
 }
 
-/** Is this node a positional argument, and is it a bare identifier? */
+/**
+ * A name bound from a call originates in that call's return.
+ *
+ * `let pose = draw_pose(..)` traced upward should reach what `draw_pose`
+ * returns, not report that `pose` came from nowhere.
+ */
+async function stepUpThroughBinding(ws: Workspace, from: Frontier): Promise<Step[]> {
+  const lang = from.located.tree.language;
+  const value = boundValue(lang, from.node);
+  if (value === null) return [];
+
+  const call = callWithin(lang, value);
+  if (call === null) return []; // bound to a literal or an expression: a real end
+
+  const callee = await calleeFn(ws, from.located, call);
+  if (callee === null) return [{ at: from, stop: "unresolved" }];
+
+  const calleeLang = callee.located.tree.language;
+  const exprs = returnValues(calleeLang, callee.node);
+  if (exprs.length === 0) return [{ at: from, stop: "return" }];
+
+  const out: Step[] = [];
+  for (const expr of exprs) {
+    const name = principalName(calleeLang, expr);
+    const here: Frontier = { located: callee.located, node: name ?? expr, distance: from.distance };
+    if (name === null) out.push({ at: here, stop: "return" });
+    else out.push({ to: here });
+  }
+  return out;
+}
+
+/**
+ * Is this node a positional argument, and is it the name that argument denotes?
+ *
+ * Walks out to whatever expression sits directly in the argument list, then
+ * asks what single name that expression denotes. `&mut x` denotes `x`, so
+ * tracing `x` follows; `item.fields` denotes `fields`, so tracing `fields`
+ * follows but tracing `item` does not — `item` is the container, and claiming
+ * the container flows into the callee would be a different assertion than the
+ * one the syntax supports.
+ */
 function argumentSlot(
+  lang: Language,
   node: SyntaxNode,
 ): { call: SyntaxNode; index: number; bare: boolean } | null {
-  const parent = node.parent;
-  if (parent === null) return null;
-
-  if (parent.rawKind === "arguments") {
-    const index = parent.children().findIndex((c) => c.bytes.start === node.bytes.start);
-    const call = parent.parent;
-    if (call === null || index < 0) return null;
-    return { call, index, bare: node.kind === "ident" };
+  // Bounded so a node outside any call walks out to nothing rather than to the
+  // top of the file.
+  let arg = node;
+  for (let depth = 0; arg.parent !== null && arg.parent.rawKind !== "arguments"; depth++) {
+    if (depth >= MAX_ARG_NESTING) return null;
+    if (STOPS_ARG_WALK.has(arg.parent.kind)) return null;
+    arg = arg.parent;
   }
 
-  // Wrapped in something — `x + 1`, `&x`, `x.into()`. Walk out once to see
-  // whether that wrapper is itself an argument; if so this is a non-bare one.
-  const outer = parent.parent;
-  if (outer?.rawKind === "arguments") {
-    const index = outer.children().findIndex((c) => c.bytes.start === parent.bytes.start);
-    const call = outer.parent;
-    if (call === null || index < 0) return null;
-    return { call, index, bare: false };
-  }
-  return null;
+  const list = arg.parent;
+  if (list === null) return null;
+  const index = list.children().findIndex((c) => c.bytes.start === arg.bytes.start);
+  const call = list.parent;
+  if (call === null || index < 0) return null;
+
+  const principal = principalName(lang, arg);
+  const bare = principal !== null && principal.bytes.start === node.bytes.start;
+  return { call, index, bare };
 }
+
+/** An argument list is inside an expression; crossing these means we left it. */
+const STOPS_ARG_WALK: ReadonlySet<string> = new Set(["fn", "block", "stmt", "impl", "mod"]);
+const MAX_ARG_NESTING = 12;
 
 /** The parameter this identifier declares, and its position in the signature. */
 function parameterSlot(
@@ -290,13 +415,12 @@ function parameterSlot(
   return null;
 }
 
-/** Resolve a call's callee and hand back its Nth parameter. */
-async function parameterFor(
+/** Resolve a call's callee to its definition. */
+async function calleeFn(
   ws: Workspace,
   located: Located,
   call: SyntaxNode,
-  index: number,
-): Promise<Frontier | null> {
+): Promise<{ located: Located; node: SyntaxNode } | null> {
   const callee = call.children()[0];
   if (callee === undefined) return null;
 
@@ -320,14 +444,34 @@ async function parameterFor(
 
   const fn = at.kind === "fn" ? at : target.tree.enclosingItem(at);
   if (fn === null || fn.kind !== "fn") return null;
+  return { located: target, node: fn };
+}
 
-  const params = fn.children().find((c) => c.rawKind === "parameters");
+/** Resolve a call's callee and hand back its Nth parameter. */
+async function parameterFor(
+  ws: Workspace,
+  located: Located,
+  call: SyntaxNode,
+  index: number,
+): Promise<Frontier | null> {
+  const resolved = await calleeFn(ws, located, call);
+  if (resolved === null) return null;
+  const target = resolved.located;
+
+  const params = resolved.node.children().find((c) => c.rawKind === "parameters");
   const param = params?.children()[index];
   if (param === undefined) return null;
 
   const named = param.kind === "ident" ? param : param.identifiers()[0];
   if (named === undefined) return null;
   return { located: target, node: named, distance: 0 };
+}
+
+function enclosingFn(located: Located, node: SyntaxNode): SyntaxNode | null {
+  for (const ancestor of located.tree.ancestors(node)) {
+    if (ancestor.kind === "fn") return ancestor;
+  }
+  return null;
 }
 
 function enclosingCall(node: SyntaxNode): SyntaxNode | null {

@@ -87,6 +87,56 @@ describe("trace", { skip }, () => {
     assert.match(res.text, /^up /m, `expected upward sites:\n${res.text}`);
   });
 
+  test("decoration is peeled: a borrow is still the same name", async () => {
+    // `borrowed(&seed)` — `&mut`/`&`/parens/`.clone()` change the type, not
+    // which name is flowing. Stopping at the wrapper strands a Rust trace at
+    // the first argument it meets.
+    const seed = await handleFor("src/pipeline.rs:40", "seed");
+    const res = await fx.rpc({ op: "trace", target: seed, maxUp: 0, maxDown: 2 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `peeled borrow:\n${res.text}`);
+  });
+
+  test("decoration is peeled through a zero-argument method call", async () => {
+    // `borrowed(&(seed.clone()))` — three wrappers deep, one name underneath.
+    const seed = await handleFor("src/pipeline.rs:40", "seed");
+    const res = await fx.rpc({ op: "trace", target: seed, maxUp: 0, maxDown: 2 });
+    assert.ok(res.ok, res.text);
+    // Both call sites converge on the same parameter, so the second arrival is
+    // a cycle — the point is that neither stops at its wrapper.
+    const rows = res.text.split("\n").filter((l) => /ident carried/.test(l));
+    assert.equal(rows.length, 2, `both call sites reach the parameter:\n${res.text}`);
+    assert.doesNotMatch(res.text, /stop:non-ident-arg/, `nothing left undecorated:\n${res.text}`);
+  });
+
+  test("a name bound from a call traces up into what that call returns", async () => {
+    // `let one = borrowed(&seed)` — the value's origin is `borrowed`'s tail
+    // expression. Following arguments alone loses every `let x = f(..)`.
+    const one = await handleFor("src/pipeline.rs:41", "one");
+    const res = await fx.rpc({ op: "trace", target: one, maxUp: 2, maxDown: 0 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `return hop:\n${res.text}`);
+  });
+
+  test("a returned value traces down into the caller's binding", async () => {
+    // The inverse hop: `carried` leaves `borrowed` via `*carried`, arriving as
+    // `one` and `two` in the caller.
+    const carried = await handleFor("src/pipeline.rs:48", "carried");
+    const res = await fx.rpc({ op: "trace", target: carried, maxUp: 0, maxDown: 2 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /ident one\b/, `bound in caller:\n${res.text}`);
+    assert.match(res.text, /ident two\b/, `both call sites:\n${res.text}`);
+  });
+
+  test("a return that denotes no single name stops, saying so", async () => {
+    // `scale`'s tail is `value * factor`. Neither operand alone is the return
+    // value, and the walk must not pick one — same rule as `f(x + 1)`.
+    const scaled = await handleFor("src/main.rs:16", "scaled");
+    const res = await fx.rpc({ op: "trace", target: scaled, maxUp: 2, maxDown: 0 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /stop:return/, `honest about the tail:\n${res.text}`);
+  });
+
   test("an ambiguous position is refused rather than guessed", async () => {
     const res = await fx.rpc({ op: "trace", target: "src/pipeline.rs:15", maxUp: 0, maxDown: 2 });
     assert.equal(res.ok, false, res.text);
