@@ -154,22 +154,40 @@ language detection or an explicit override belongs later.
 **Why a TypeScript profile isn't just a second config object.** Investigated
 empirically the way rust-analyzer's readiness was originally pinned down —
 spawn the server, log every notification, and test what queries actually
-return before and after each candidate signal. See the readiness and
-file-lifecycle entries under Verified findings. Short version: rust-analyzer
-indexes proactively from disk with no "open" step, so `LspClient` has no
-file-lifecycle concept and doesn't need one. `typescript-language-server`
-answers correctly only about files it has been explicitly told are open via
-`textDocument/didOpen`, and stops trusting disk for a file once it is open —
-`didChangeWatchedFiles` alone (what `Workspace.files.onChange` sends today)
-does not update it. A working TS client needs to open every file in project
-scope and mirror writes through `textDocument/didChange`, which is new
-surface on the interface, not a like-for-like client swap.
+return before and after each candidate signal, first against a 2-file toy
+project and then against a real ~4500-file TypeScript project (Appsmith's
+`app/client`, cloned shallow/sparse for this purpose) to catch anything that
+only shows up at scale. It did: see Verified findings. Short version:
+rust-analyzer indexes proactively from disk with no "open" step, so
+`LspClient` has no file-lifecycle concept and doesn't need one.
+`typescript-language-server` requires the *query's own* file to be opened via
+`textDocument/didOpen` first (an unopened query target returns `[]`, not an
+error), and — once corrected for a routing bug below — does **not** require
+every file in the project to be opened; it searches the whole configured
+project regardless of open state, much closer to rust-analyzer's model than
+first measurements suggested. A working TS client still needs a minimal
+open/close lifecycle (open a file before asking about a position in it) and
+must mirror writes through `textDocument/didChange` once a file is open,
+since `didChangeWatchedFiles` alone does not invalidate it — new surface on
+`LspClient`, but far smaller than "open everything."
 
-**Open question, not yet tested:** whether this file-lifecycle requirement is
-inherent to the tsserver protocol or specific to how `typescript-language-
-server` wraps it — an alternative client (`vtsls`) or talking to tsserver's
-own protocol directly might behave differently. Worth checking before
-committing to the "open everything" design.
+**The routing bug that produced the wrong first conclusion.**
+`typescript-language-server` runs a syntax/semantic tsserver pair (partial
+semantic mode: a fast syntax-only server plus a real semantic one) and races
+them — cheap requests can be answered by the syntax server before the
+semantic server has finished loading the real project. The syntax server's
+project is a throwaway single-file `Inferred` project rooted at `/dev/null`,
+confirmed directly from tsserver's own log (`.log/tsserver-log-*/tsserver.log`
+under the workspace root): `Finding references to ... in project
+/dev/null/inferredProject1*`. Its answer is a well-formed, empty
+`references` response — nothing marks it as coming from the wrong server. On
+the 2-file toy project the semantic server always won the race (project load
+near-instant), which is why the first pass concluded incorrectly that every
+file needed opening. Setting `initializationOptions.tsserver.useSyntaxServer:
+"never"` forces every request through the real semantic server; with that set
+and only the *declaration's own file* ever opened, `references` on Appsmith's
+`useFeatureFlag` (83 real call sites per `grep`) correctly returned 178 hits
+across 81 files, none of which were ever `didOpen`'d.
 
 ## Testing
 
@@ -323,19 +341,47 @@ fast-and-wrong. Every call after that was single-digit milliseconds. A TS
 `whenReady()` can plausibly be a no-op — see the next finding for the
 condition that makes this true or false.
 
-**Every file that matters to a query must be `textDocument/didOpen`'d first,
-or the answer is silently wrong, not an error.** Confirmed against source
-(`typescript-language-server`'s `references()` handler, `cli.mjs:24342`):
-it calls `tsClient.toOpenDocument(uri)` and returns `[]` outright if the
-query's own file was never opened — no error, no distinguishing marker.
-Worse: even with the query file open, if the file holding the actual usage
-was never opened, tsserver's own `References` command returns empty after
-doing real multi-second work. Reproduced with a two-file fixture
-(`helper.ts` declaring `helperFn`, `main.ts` calling it): opening only the
-declaration's file and asking for references finds nothing; opening both
-finds both usages correctly. Exactly the ambiguity DESIGN.md §8 says a
-terminated branch must never have — an empty result here is indistinguishable
-from a correct one.
+**The query's own file must be `textDocument/didOpen`'d first, or the answer
+is silently wrong, not an error — but files elsewhere in the project do not
+need to be.** Confirmed against source (`typescript-language-server`'s
+`references()` handler, `cli.mjs:24342`): it calls
+`tsClient.toOpenDocument(uri)` and returns `[]` outright if the query's own
+file was never opened — no error, no distinguishing marker, exactly the
+ambiguity DESIGN.md §8 says a terminated branch must never have. First
+measured against a two-file toy fixture, this looked like it extended to
+*every* file involved — opening only the declaration's file and asking for
+references found nothing there. That reading turned out to be an artifact of
+the syntax/semantic routing bug below, not a real per-file requirement: at
+Appsmith scale, with the routing bug fixed and only the query's own file ever
+opened, `references` correctly found real usages in 81 files that were never
+opened. The minimal, real requirement is narrow — open the file a position is
+asked about, nothing more.
+
+**`typescript-language-server` races a syntax-only tsserver against the real
+one, and the syntax one can silently answer semantic queries wrong.** It runs
+a syntax/semantic tsserver pair (partial semantic mode — a fast syntax-only
+server plus a real one) and can route a request to whichever answers first.
+The syntax server's project is a throwaway single-file `Inferred` project
+rooted at `/dev/null` — confirmed directly from tsserver's own log
+(`.log/tsserver-log-*/tsserver.log` under the workspace root):
+`Finding references to ... in project /dev/null/inferredProject1*`. Its reply
+is a well-formed, empty `references` response; nothing in the LSP-level
+response marks it as coming from the wrong server. On a 2-file toy project
+the real (semantic) server always won the race, since project load was
+near-instant, which is what produced the overly pessimistic finding above.
+On a real ~4500-file project (Appsmith's `app/client`) project load takes
+several seconds and the syntax server answered first every time, every
+answer empty. Setting `initializationOptions.tsserver.useSyntaxServer:
+"never"` forces every request through the real server and fixed it
+completely.
+
+**All four `LspClient` methods checked out at Appsmith scale under the fixed
+config.** `references` and `workspace/symbol` above; `definition` separately,
+querying from a real, never-before-opened call site
+(`GlobalSearch/index.tsx`) for a symbol declared in a different file that was
+also never opened — it correctly resolved cross-file into
+`useFeatureFlag.ts`'s real declaration. `didChangeWatched` covered by the
+finding below.
 
 **Once a file is open, tsserver stops trusting disk for it.**
 `workspace/didChangeWatchedFiles` (type `Changed`) — the only file-change
@@ -343,7 +389,12 @@ notification the current `RustAnalyzer` client sends, via
 `Workspace.files.onChange` — has no effect on an already-open document.
 Renaming a symbol on disk and sending only `didChangeWatchedFiles` left query
 results unchanged (stale, pointing at the old name); only an explicit
-`textDocument/didChange` with real content updated them. A TS profile that
-opens files — which the previous finding makes mandatory — but keeps
-notifying changes only via `didChangeWatchedFiles` would silently serve stale
-answers after the first edit to any opened file.
+`textDocument/didChange` with real content updated them. Reproduced at
+Appsmith scale too, with the routing bug fixed: a disk rename plus
+`didChangeWatchedFiles` alone left `references` unchanged (178 hits / 81
+files, identical to baseline); only a real `didChange` updated it, correctly
+dropping to zero once the callers no longer matched the renamed symbol. A TS
+profile that
+opens a file to query it — the real, narrower requirement above — but keeps
+notifying changes only via `didChangeWatchedFiles` would silently serve a
+stale answer after the first edit to any file it had reason to open.
