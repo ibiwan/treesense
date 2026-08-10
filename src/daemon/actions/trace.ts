@@ -38,7 +38,7 @@ import { renderSite } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
 import type { FilePath, Site, StopReason } from "../../shared/types.js";
 import { locate, mint, questionNode, type Located } from "../locate.js";
-import { pathToUri, uriToPath } from "../lsp.js";
+import { pathToUri, uriToPath } from "../lsp-client.js";
 import { byteToPosition, positionToByte } from "../positions.js";
 import {
   boundName,

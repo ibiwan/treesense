@@ -1,5 +1,5 @@
 /**
- * rust-analyzer client.
+ * rust-analyzer client — the rust half of the language seam.
  *
  * We own the instance rather than borrowing the editor's, because we need a
  * lifecycle we control. It is a real cost — a second multi-gigabyte resident
@@ -40,24 +40,17 @@ import type {
   ServerCapabilities,
 } from "vscode-languageserver-protocol";
 
+import type { LanguageProfile } from "../language-profile.js";
+import {
+  pathToUri,
+  type IndexStatus,
+  type LspClient,
+  type Readiness,
+  type WorkspaceSymbol,
+} from "../lsp-client.js";
+
 /** LSP `ContentModified`: the server's state moved while it was answering. */
 const CONTENT_MODIFIED = -32801;
-
-export type Readiness = "starting" | "indexing" | "ready" | "failed";
-
-/** The most useful current LSP work item for an agent deciding what to do next. */
-export interface IndexStatus {
-  readiness: Readiness;
-  phase?: string;
-  message?: string;
-  percentage?: number;
-}
-
-/** The location-bearing subset shared by LSP workspace-symbol response forms. */
-export interface WorkspaceSymbol {
-  name: string;
-  location: Location;
-}
 
 interface Progress {
   phase: string;
@@ -65,7 +58,7 @@ interface Progress {
   percentage?: number;
 }
 
-export interface LspOptions {
+export interface RustAnalyzerOptions {
   /** Workspace root. Must be canonical. */
   root: string;
   command?: string;
@@ -73,7 +66,7 @@ export interface LspOptions {
   targetDir?: string;
 }
 
-export class RustAnalyzer {
+export class RustAnalyzer implements LspClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private conn: MessageConnection | null = null;
   private capabilities: ServerCapabilities | null = null;
@@ -81,7 +74,7 @@ export class RustAnalyzer {
   private readonly progress = new Map<string | number, Progress>();
   private readyWaiters: Array<() => void> = [];
 
-  constructor(private readonly opts: LspOptions) {}
+  constructor(private readonly opts: RustAnalyzerOptions) {}
 
   get readiness(): Readiness {
     return this.state;
@@ -358,10 +351,21 @@ export class RustAnalyzer {
   }
 }
 
-export function pathToUri(path: string): string {
-  return `file://${path.split("/").map(encodeURIComponent).join("/")}`;
+export interface RustProfileOptions {
+  command?: string;
+  /** Isolate from the editor's target/ so cargo's exclusive lock is never contended. */
+  targetDir?: string;
 }
 
-export function uriToPath(uri: string): string {
-  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
+export function createRustProfile(opts: RustProfileOptions = {}): LanguageProfile {
+  return {
+    id: "rust",
+    createClient(root) {
+      return new RustAnalyzer({
+        root,
+        ...(opts.command === undefined ? {} : { command: opts.command }),
+        ...(opts.targetDir === undefined ? {} : { targetDir: opts.targetDir }),
+      });
+    },
+  };
 }

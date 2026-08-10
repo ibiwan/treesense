@@ -26,6 +26,7 @@ import { overview } from "./actions/overview.js";
 import { read } from "./actions/read.js";
 import { refs } from "./actions/refs.js";
 import { trace } from "./actions/trace.js";
+import { createRustProfile } from "./languages/rust.js";
 import { registerLanguages } from "./syntax.js";
 import { Workspace } from "./workspace.js";
 
@@ -144,7 +145,11 @@ async function main(): Promise<void> {
   const useTcp = !useStdio && Number.isInteger(tcpPort) && tcpPort > 0;
   const socketPath = useStdio || useTcp ? undefined : socketPathFor(root);
 
-  const ws = new Workspace(root, targetDir);
+  // The only profile that exists today. Selecting one for a given root by
+  // detection (Cargo.toml vs tsconfig.json) or an explicit override is future
+  // work — see DESIGN.md's language-profile seam.
+  const profile = createRustProfile(targetDir === undefined ? {} : { targetDir });
+  const ws = new Workspace(root, profile);
 
   if (useStdio) {
     handle(ws, process.stdin, process.stdout);

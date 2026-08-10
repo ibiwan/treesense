@@ -33,7 +33,7 @@ import {
   questionNode,
   type Located,
 } from "../locate.js";
-import { pathToUri, uriToPath } from "../lsp.js";
+import { pathToUri, uriToPath } from "../lsp-client.js";
 import { byteToPosition, positionToByte } from "../positions.js";
 import { isItemKind, type SyntaxNode } from "../syntax.js";
 import type { Workspace } from "../workspace.js";

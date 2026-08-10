@@ -24,6 +24,8 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | ✅ | **M6** `trace` |
 | 🚧 | **M7** use it against a real workload and measure |
 | ✅ | `move` — relocate a handle's bytes before/after another handle, same-file or cross-file (added post-M6, see REVIEW_NOTES.md) |
+| ✅ | Language-profile seam — `LspClient` interface, `RustAnalyzer` extracted behind `createRustProfile()` (see below) |
+| 🚧 | TypeScript profile — readiness/file-lifecycle investigated, no client implementation yet (see below) |
 
 All six verbs are implemented and exercised. A first qualitative Tauroid run
 confirmed the navigation workflow is less noisy than `grep` plus `cat`; M7
@@ -128,6 +130,46 @@ premise is the entire point of the project and is so far entirely untested.
 returned, successful target selection and retry frequency once `refs`/`read`
 work gives a number to compare against later. Left until M7, there is nothing
 to compare the finished tool *to*, and the headline claim stays an assertion.
+
+## Language profile — TypeScript
+
+The daemon supported exactly one target language, hardcoded, until this
+milestone. Two things had to happen before a second language was even a
+question worth answering: separate the shared engine from the Rust-specific
+half, and find out what the LSP side of "TypeScript" actually requires. Both
+are done; a working TypeScript `LanguageProfile` is not.
+
+**The seam.** `src/daemon/lsp-client.ts` holds the `LspClient` interface
+(`start`/`stop`/`whenReady`/`references`/`definition`/`workspaceSymbols`/
+`didChangeWatched`) plus the language-agnostic bits — `Readiness`,
+`IndexStatus`, `WorkspaceSymbol`, `pathToUri`/`uriToPath`. `src/daemon/
+language-profile.ts` holds the one-method `LanguageProfile` interface
+(`createClient(root) => LspClient`). `src/daemon/languages/rust.ts` is the old
+`lsp.ts` moved verbatim behind `createRustProfile()` — unchanged behavior,
+same 17 unit + 73 integration tests green. `Workspace` now takes a
+`LanguageProfile` instead of constructing `RustAnalyzer` directly; `index.ts`
+is the only place that currently picks `createRustProfile()`, which is where
+language detection or an explicit override belongs later.
+
+**Why a TypeScript profile isn't just a second config object.** Investigated
+empirically the way rust-analyzer's readiness was originally pinned down —
+spawn the server, log every notification, and test what queries actually
+return before and after each candidate signal. See the readiness and
+file-lifecycle entries under Verified findings. Short version: rust-analyzer
+indexes proactively from disk with no "open" step, so `LspClient` has no
+file-lifecycle concept and doesn't need one. `typescript-language-server`
+answers correctly only about files it has been explicitly told are open via
+`textDocument/didOpen`, and stops trusting disk for a file once it is open —
+`didChangeWatchedFiles` alone (what `Workspace.files.onChange` sends today)
+does not update it. A working TS client needs to open every file in project
+scope and mirror writes through `textDocument/didChange`, which is new
+surface on the interface, not a like-for-like client swap.
+
+**Open question, not yet tested:** whether this file-lifecycle requirement is
+inherent to the tsserver protocol or specific to how `typescript-language-
+server` wraps it — an alternative client (`vtsls`) or talking to tsserver's
+own protocol directly might behave differently. Worth checking before
+committing to the "open everything" design.
 
 ## Testing
 
@@ -256,3 +298,52 @@ saving, a `git checkout`, another agent — so LSP requests retry through it.
 
 **Unix socket paths cap near 104 bytes** (`sun_path`). Exceeding it does not
 reliably raise — the daemon can listen successfully and be unreachable.
+
+**`typescript@7` (the tsgo/native-compiler rewrite) ships no `tsserver.js`.**
+`typescript-language-server` requires the classic tsserver and fails
+`initialize` with "Could not find a valid TypeScript installation" against a
+workspace pinned to TS 7. Dev/test fixtures must pin `typescript@5` (or
+configure `tsserver.path` explicitly) until the ecosystem catches up.
+
+**`typescript-language-server` has no `quiescent`-equivalent readiness
+signal.** Verified with `typescript-language-server` 5.3.0 / tsserver 5.9.3,
+same method as the rust-analyzer findings above: spawn it, log every
+notification, test what queries actually return. Every notification observed
+was one of `window/logMessage`, `$/typescriptVersion`,
+`textDocument/publishDiagnostics`; a `window/workDoneProgress/create` request
+fires once but is never followed by a `$/progress` begin/report/end tied to
+project load. There is nothing to subscribe to.
+
+**Readiness is implicit in request latency, not a signal to wait for — for
+the request that's actually asking about the right files.** The first
+`textDocument/references` sent immediately after `didOpen`, with no wait at
+all, returned the correct cross-file answer; it simply took ~2.8s (project
+load happening synchronously inside the request) instead of returning
+fast-and-wrong. Every call after that was single-digit milliseconds. A TS
+`whenReady()` can plausibly be a no-op — see the next finding for the
+condition that makes this true or false.
+
+**Every file that matters to a query must be `textDocument/didOpen`'d first,
+or the answer is silently wrong, not an error.** Confirmed against source
+(`typescript-language-server`'s `references()` handler, `cli.mjs:24342`):
+it calls `tsClient.toOpenDocument(uri)` and returns `[]` outright if the
+query's own file was never opened — no error, no distinguishing marker.
+Worse: even with the query file open, if the file holding the actual usage
+was never opened, tsserver's own `References` command returns empty after
+doing real multi-second work. Reproduced with a two-file fixture
+(`helper.ts` declaring `helperFn`, `main.ts` calling it): opening only the
+declaration's file and asking for references finds nothing; opening both
+finds both usages correctly. Exactly the ambiguity DESIGN.md §8 says a
+terminated branch must never have — an empty result here is indistinguishable
+from a correct one.
+
+**Once a file is open, tsserver stops trusting disk for it.**
+`workspace/didChangeWatchedFiles` (type `Changed`) — the only file-change
+notification the current `RustAnalyzer` client sends, via
+`Workspace.files.onChange` — has no effect on an already-open document.
+Renaming a symbol on disk and sending only `didChangeWatchedFiles` left query
+results unchanged (stale, pointing at the old name); only an explicit
+`textDocument/didChange` with real content updated them. A TS profile that
+opens files — which the previous finding makes mandatory — but keeps
+notifying changes only via `didChangeWatchedFiles` would silently serve stale
+answers after the first edit to any opened file.
