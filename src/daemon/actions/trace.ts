@@ -44,6 +44,7 @@ import {
   boundName,
   boundValue,
   callWithin,
+  parametersOf,
   principalName,
   returnValues,
   type Language,
@@ -405,8 +406,8 @@ function parameterSlot(
 ): { fn: SyntaxNode; index: number } | null {
   for (const ancestor of located.tree.ancestors(node)) {
     if (ancestor.kind !== "fn") continue;
-    const params = ancestor.children().find((c) => c.rawKind === "parameters");
-    if (params === undefined) return null;
+    const params = parametersOf(located.tree.language, ancestor);
+    if (params === null) return null;
     const index = params
       .children()
       .findIndex((p) => p.bytes.start <= node.bytes.start && node.bytes.end <= p.bytes.end);
@@ -458,7 +459,7 @@ async function parameterFor(
   if (resolved === null) return null;
   const target = resolved.located;
 
-  const params = resolved.node.children().find((c) => c.rawKind === "parameters");
+  const params = parametersOf(target.tree.language, resolved.node);
   const param = params?.children()[index];
   if (param === undefined) return null;
 

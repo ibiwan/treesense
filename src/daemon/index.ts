@@ -27,6 +27,7 @@ import { read } from "./actions/read.js";
 import { refs } from "./actions/refs.js";
 import { trace } from "./actions/trace.js";
 import { createRustProfile } from "./languages/rust.js";
+import { createTypeScriptProfile } from "./languages/typescript.js";
 import { registerLanguages } from "./syntax.js";
 import { Workspace } from "./workspace.js";
 
@@ -145,10 +146,18 @@ async function main(): Promise<void> {
   const useTcp = !useStdio && Number.isInteger(tcpPort) && tcpPort > 0;
   const socketPath = useStdio || useTcp ? undefined : socketPathFor(root);
 
-  // The only profile that exists today. Selecting one for a given root by
-  // detection (Cargo.toml vs tsconfig.json) or an explicit override is future
-  // work — see DESIGN.md's language-profile seam.
-  const profile = createRustProfile(targetDir === undefined ? {} : { targetDir });
+  // Selecting a profile by detection (Cargo.toml vs tsconfig.json) is future
+  // work — see DESIGN.md's language-profile seam. FLUENT_LANG is an explicit
+  // override in the meantime, mainly so tests can pick a profile without a
+  // detection step existing yet; it is not itself the detection feature.
+  const tsserverPath = process.env.FLUENT_TS_TSSERVER_PATH;
+  const tsCommand = process.env.FLUENT_TS_COMMAND;
+  const profile = process.env.FLUENT_LANG === "typescript"
+    ? createTypeScriptProfile({
+        ...(tsCommand === undefined ? {} : { command: tsCommand }),
+        ...(tsserverPath === undefined ? {} : { tsserverPath }),
+      })
+    : createRustProfile(targetDir === undefined ? {} : { targetDir });
   const ws = new Workspace(root, profile);
 
   if (useStdio) {

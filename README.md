@@ -96,6 +96,9 @@ Read a returned handle to drill in. `find` and `read` work while the semantic
 index warms; `refs` and `trace` wait automatically. A capped `find` response
 names the accepted `haystack` refinements: a file, line range, or handle.
 
+(If you need a term to search on just to exercise the stack, use the following to find one!)
+`rg --files . | shuf -n 1 | xargs rg -ow '[a-zA-Z_][a-zA-Z0-9_]*' | shuf -n 1`
+
 When a large handle becomes an overview, select several listed children in one
 call with `read({ target: "#parent", sections: ["#child1", "#child2"] })`.
 The children must still be current and inside that parent; their request order

@@ -23,6 +23,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** dist/testkit -> repo root */
 const repoRoot = join(here, "..", "..");
 export const FIXTURE = join(repoRoot, "fixtures", "rust-workspace");
+export const FIXTURE_TS = join(repoRoot, "fixtures", "typescript-project");
+/**
+ * The fixture is dependency-free (see its README), so `typescript-language-
+ * server` is pointed at the repo's own `typescript` devDependency instead of
+ * expecting the fixture to carry its own `node_modules`. Already guaranteed
+ * present by `npm install` for `npm test` itself.
+ */
+const REPO_TSSERVER_PATH = join(repoRoot, "node_modules", "typescript", "lib", "tsserver.js");
 
 /**
  * Where test sockets live. Overridable because `tmpdir()` is not always
@@ -42,6 +50,16 @@ export function hasRustAnalyzer(): boolean {
   }
 }
 
+/** Same reasoning as `hasRustAnalyzer`, for the TypeScript profile. */
+export function hasTypeScriptLanguageServer(): boolean {
+  try {
+    execFileSync("typescript-language-server", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One reason string for the whole integration suite, or `false` to run it.
  * Every prerequisite that can be missing gets named here rather than
@@ -49,6 +67,11 @@ export function hasRustAnalyzer(): boolean {
  */
 export function skipReason(): string | false {
   if (!hasRustAnalyzer()) return "rust-analyzer is not on PATH";
+  return false;
+}
+
+export function skipReasonTs(): string | false {
+  if (!hasTypeScriptLanguageServer()) return "typescript-language-server is not on PATH";
   return false;
 }
 
@@ -83,12 +106,20 @@ interface Running extends Harness {
   stop(): Promise<void>;
 }
 
-export async function startFixture(): Promise<Running> {
+export interface FixtureOptions {
+  /** Defaults to the Rust fixture. */
+  fixture?: string;
+  /** Defaults to "rust". */
+  lang?: "rust" | "typescript";
+}
+
+export async function startFixture(opts: FixtureOptions = {}): Promise<Running> {
+  const lang = opts.lang ?? "rust";
   const root = await mkdtemp(join(tmpdir(), "fl-fx-"));
 
   // `target/` is build output — copying it would be slow and pointless, and a
   // stale one can confuse a fresh index.
-  await cp(FIXTURE, root, {
+  await cp(opts.fixture ?? FIXTURE, root, {
     recursive: true,
     filter: (src) => !src.includes(`${"/"}target`),
   });
@@ -105,6 +136,9 @@ export async function startFixture(): Promise<Running> {
       ...(transport.kind === "unix"
         ? { FLUENT_SOCKET: transport.socket }
         : { FLUENT_STDIO: "1" }),
+      ...(lang === "typescript"
+        ? { FLUENT_LANG: "typescript", FLUENT_TS_TSSERVER_PATH: REPO_TSSERVER_PATH }
+        : {}),
     },
     stdio: transport.kind === "stdio" ? ["pipe", "pipe", "pipe"] : ["ignore", "ignore", "pipe"],
   });
@@ -178,6 +212,9 @@ export async function startFixture(): Promise<Running> {
     },
   };
 }
+
+export const startTypeScriptFixture = (): Promise<Running> =>
+  startFixture({ fixture: FIXTURE_TS, lang: "typescript" });
 
 let counter = 0;
 

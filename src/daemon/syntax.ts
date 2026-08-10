@@ -185,6 +185,23 @@ const PEEL: Record<Language, PeelTable> = {
 const MAX_PEEL = 12;
 
 /**
+ * Raw kind of a function declaration's parameter list — diverges per
+ * grammar. tree-sitter-rust calls it `parameters`; tree-sitter-typescript
+ * (and JS/TSX, which share its shape) calls it `formal_parameters`.
+ */
+const PARAMETERS_KIND: Record<Language, string> = {
+  rust: "parameters",
+  typescript: "formal_parameters",
+  javascript: "formal_parameters",
+  tsx: "formal_parameters",
+};
+
+/** The parameter-list node of a function-kind declaration, or null if none is found. */
+export function parametersOf(lang: Language, fn: SyntaxNode): SyntaxNode | null {
+  return fn.children().find((c) => c.rawKind === PARAMETERS_KIND[lang]) ?? null;
+}
+
+/**
  * The single identifier an expression denotes, or null when it denotes no one
  * name — `a + b`, a literal, a call with arguments.
  *
@@ -575,9 +592,25 @@ class Tree implements SyntaxTree {
 
   itemRangeWithDocs(node: SyntaxNode): ByteRange {
     const sg = (node as Node).raw;
-    let start = node.bytes.start;
 
-    for (let prev = sg.prev(); prev !== null; prev = prev.prev()) {
+    // TS/JS wrap a lone declaration in an `export_statement`, contributing a
+    // leading "export"/"export default" the declaration's own range
+    // excludes. That prefix is real text belonging to the declaration — a
+    // move or edit using the bare range would leave the keyword behind as an
+    // orphan token — and a doc comment precedes the wrapper, not the
+    // declaration nested inside it, so the backward walk for docs has to
+    // start there too: `sg.prev()` alone finds nothing, since the
+    // declaration has no siblings of its own, and a comment sitting right
+    // above `export function foo` would be reported detached.
+    const parent = sg.parent();
+    const wrapped = parent !== null
+      && !isItemKind(normaliseKind(this.language, String(parent.kind())))
+      && parent.children().filter((c) => c.isNamed()).length === 1;
+    const anchor = wrapped ? parent! : sg;
+
+    let start = this.offsets.toBytes(anchor.range().start.index);
+
+    for (let prev = anchor.prev(); prev !== null; prev = prev.prev()) {
       if (!DOC_KINDS.has(String(prev.kind()))) break;
       const prevRange = {
         start: this.offsets.toBytes(prev.range().start.index),

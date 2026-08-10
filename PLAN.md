@@ -239,6 +239,53 @@ unmapped raw kind (e.g. a constructor parameter position) render as the
 generic `expr` fallback rather than something like `param` — `KIND_MAP.
 typescript` in `syntax.ts` is not yet as complete as `KIND_MAP.rust`.
 
+**A third bug, same root cause as the `export_statement` one, in a different
+place: `trace.ts` hardcoded the raw grammar kind of a parameter list as
+`"parameters"`, which is tree-sitter-rust's name for it — tree-sitter-
+typescript (and JS/TSX) calls it `formal_parameters`.** Silent, not a thrown
+error: tracing a value down across a call boundary just stopped with
+`unresolved`, indistinguishable from a real dead end, at exactly the point
+that needed to look up the callee's parameter list. Found via a real
+`trace` integration test, not a raw probe. Fixed by extracting a
+`PARAMETERS_KIND` per-language table and a `parametersOf(lang, fn)` helper in
+`syntax.ts`, following the same shape as `KIND_MAP`/`PEEL`, and updating both
+call sites in `trace.ts` (`parameterSlot`, `parameterFor`) to use it instead
+of the hardcoded string.
+
+**A fourth: `itemRangeWithDocs` excluded the `export` keyword entirely from
+an exported TS declaration's own range, not just its doc comment.** Bigger
+than a JSDoc-attachment gap — `mint()` uses this range for every item-kind
+handle, so `edit`/`move` on any exported TS symbol would have left a
+dangling `export` keyword behind as an orphan token, a real corruption risk,
+not just a cosmetic one. Same root cause as the `enclosingItem` fix: the
+wrapped declaration's own byte range starts at `function`/`class`/etc, after
+the wrapper's `export`/`export default` prefix, and the doc-comment backward
+walk (`sg.prev()`) found nothing to walk from, since the declaration has no
+siblings of its own inside the wrapper. Fixed by anchoring both the range's
+start and the backward doc walk on the wrapper node when the item is a lone
+child of a non-item parent, falling back to the item's own node otherwise
+(so Rust, which has no such wrapper, is unaffected — confirmed by the full
+suite staying green).
+
+**Built out the durable test coverage this all depended on `PLAN.md` prose
+and scratch scripts for until now.** `fixtures/typescript-project` (mirrors
+`fixtures/rust-workspace`'s role — dependency-free, tests point
+`tsserverPath` at the repo's own `typescript` devDependency instead of
+requiring a fixture-local install) plus `src/integration/typescript.test.ts`
+(12 tests covering symbolic refs through the `export_statement` fix,
+cross-file resolution, JSDoc attachment, the `non-ident-arg`/cross-boundary
+trace cases that caught the `formal_parameters` bug, and declaration merging
+as a genuine relocator-ambiguity case). `testkit/index.ts` gained
+`skipReasonTs()`/`hasTypeScriptLanguageServer()` mirroring the Rust pair
+exactly, and `startFixture()` took an options parameter (`fixture`, `lang`)
+so both profiles share one harness; `startTypeScriptFixture()` is the
+convenience wrapper. `index.ts` reads `FLUENT_LANG=typescript` (plus
+`FLUENT_TS_COMMAND`/`FLUENT_TS_TSSERVER_PATH`) to select the profile — an
+explicit override for tests to use, not the detection feature itself, which
+is still future work. Full suite: 18 unit + 85 integration (73 Rust + 12
+TypeScript), all green; the TypeScript suite skips cleanly with a message
+when `typescript-language-server` isn't on PATH, same as Rust's.
+
 ## Testing
 
 Two tiers, because one slow suite is a suite that stops being run.
