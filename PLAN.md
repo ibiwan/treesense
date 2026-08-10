@@ -25,7 +25,7 @@ disagree, that document wins — and the disagreement is a bug in one of them.
 | 🚧 | **M7** use it against a real workload and measure |
 | ✅ | `move` — relocate a handle's bytes before/after another handle, same-file or cross-file (added post-M6, see REVIEW_NOTES.md) |
 | ✅ | Language-profile seam — `LspClient` interface, `RustAnalyzer` extracted behind `createRustProfile()` (see below) |
-| 🚧 | TypeScript profile — readiness/file-lifecycle investigated, no client implementation yet (see below) |
+| ✅ | TypeScript profile — `TypeScriptServer implements LspClient`, `createTypeScriptProfile()` (see below) |
 
 All six verbs are implemented and exercised. A first qualitative Tauroid run
 confirmed the navigation workflow is less noisy than `grep` plus `cat`; M7
@@ -188,6 +188,56 @@ file needed opening. Setting `initializationOptions.tsserver.useSyntaxServer:
 and only the *declaration's own file* ever opened, `references` on Appsmith's
 `useFeatureFlag` (83 real call sites per `grep`) correctly returned 178 hits
 across 81 files, none of which were ever `didOpen`'d.
+
+**Built:** `src/daemon/languages/typescript.ts` — `TypeScriptServer implements
+LspClient` (`useSyntaxServer: "never"`, open-on-demand for query targets, a
+one-file bootstrap so `workspace/symbol` works before any specific file is
+touched, `didChange` only for files it opened itself) and
+`createTypeScriptProfile()`. Not yet wired into `index.ts`'s profile
+selection — that still needs the auto-detect-or-override decision noted
+above.
+
+**Bug found and fixed via real integration testing, not the raw-protocol
+probes:** declaring `window.workDoneProgress: true` in client capabilities
+without handling the server's resulting `window/workDoneProgress/create`
+request crashed the entire `typescript-language-server` process outright
+(unhandled promise rejection inside the server, not a graceful error back to
+the client) — surfaced by driving the real `Workspace` + `actions/refs.ts`
+against a live daemon, which none of the earlier raw-JSON-RPC probes would
+have caught since every probe script happened to register a handler for it
+by habit. Fixed by not declaring that capability (nothing here needs it —
+see the readiness findings above) plus a defensive blanket `onRequest(() =>
+null)` so an unhandled server request can never take the process down again.
+
+**A second bug, this one in shared code:** `refs` on a bare exported
+symbol — `export function foo()`, the overwhelmingly common shape in any
+real TypeScript file — failed with `symbol foo not found` even though
+`workspaceSymbols` itself returned the right location. Root cause: TS/JS
+wraps a declaration in an `export_statement` node whose own span starts at
+the `export` keyword, before the wrapped declaration's range begins.
+`workspace/symbol`'s returned position sits at the very start of that span,
+so `nodeAt` resolves to the `export_statement` wrapper — correctly, it *is*
+the smallest named node containing that byte — but the wrapper has no
+item-kind ancestors (climbing up finds nothing) and isn't an item itself, so
+`enclosingItem` returned null even though the real `function_declaration`
+was sitting one level down as its child. Rust has no such wrapper — a
+visibility modifier is a child token of the item itself, never a separate
+enclosing node — so no Rust test could have caught this. Fixed in
+`syntax.ts`'s `enclosingItem`: when climbing ancestors finds nothing, check
+the node's own direct children for an item-kind one before giving up. Added
+`enclosingItem sees through an export_statement wrapper` to
+`syntax.test.ts`; full suite (18 unit + 73 integration) still green
+afterward.
+
+**First bootstrapping case: treesense's TypeScript profile used against
+treesense's own source.** `overview`, `find`, `refs` (symbolic, cross-file —
+`Workspace` resolved usages grouped correctly across `locate.ts`, `deps.ts`,
+`actions/edit.ts`, `actions/find.ts` and more) and `read` all worked
+end-to-end through the real daemon code path, not a scratch probe. One
+cosmetic gap surfaced here, not a correctness bug: hierarchy lines through an
+unmapped raw kind (e.g. a constructor parameter position) render as the
+generic `expr` fallback rather than something like `param` — `KIND_MAP.
+typescript` in `syntax.ts` is not yet as complete as `KIND_MAP.rust`.
 
 ## Testing
 
@@ -398,3 +448,18 @@ profile that
 opens a file to query it — the real, narrower requirement above — but keeps
 notifying changes only via `didChangeWatchedFiles` would silently serve a
 stale answer after the first edit to any file it had reason to open.
+
+**A file the client never opened doesn't need any notification at all —
+tsserver watches every project file itself.** tsserver's own log shows a
+`Closed Script info` file watcher registered for every file in the
+configured project, opened or not. Confirmed: with only the declaration file
+open, editing a *different*, never-opened caller file directly on disk with
+zero LSP notifications sent — no `didOpen`, no `didChangeWatchedFiles`,
+nothing — was picked up on its own within a few seconds; that file correctly
+dropped out of a subsequent `references` result (178/81 → 176/80, the edited
+file gone). So the previous finding about `didChangeWatchedFiles` not
+invalidating a file only bites for files the client itself opened to answer
+a query; every other file, which is most of them, tsserver already tracks
+without help. `Workspace.files.onChange` likely needs no TS-specific branch
+at all for the common case — only a client-side "is this URI one I opened?"
+check to decide whether a write needs a `didChange`.

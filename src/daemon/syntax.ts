@@ -559,7 +559,18 @@ class Tree implements SyntaxTree {
     for (const a of this.ancestors(node)) {
       if (isItemKind(a.kind)) return a;
     }
-    return null;
+    // TS/JS wrap a declaration in an `export_statement` whose own span starts
+    // at the `export` keyword, before the declaration it wraps. A position
+    // landing in that keyword span (LSP symbol search returns exactly this —
+    // the start of the whole exported declaration) resolves via `nodeAt` to
+    // the wrapper itself: it is the smallest NAMED node containing that byte,
+    // since the wrapped declaration's own range starts later. The wrapper has
+    // no item-kind ancestors (it's usually near the top of the file) and,
+    // being a statement rather than a declaration, is not an item itself —
+    // so climbing stops with nothing, even though the real declaration is
+    // sitting one level down. Rust has no such wrapper: a visibility modifier
+    // is a child token of the item itself, never a separate enclosing node.
+    return node.children().find((c) => isItemKind(c.kind)) ?? null;
   }
 
   itemRangeWithDocs(node: SyntaxNode): ByteRange {
