@@ -286,6 +286,43 @@ is still future work. Full suite: 18 unit + 85 integration (73 Rust + 12
 TypeScript), all green; the TypeScript suite skips cleanly with a message
 when `typescript-language-server` isn't on PATH, same as Rust's.
 
+**Left undone.** In rough priority order:
+
+- **Not reachable from real usage.** `FLUENT_LANG` is a test-only override —
+  there is no auto-detection (`tsconfig.json` vs `Cargo.toml`) and no
+  documented way for an MCP client or CLI user to pick the TS profile. Today
+  the only way to use it is constructing `Workspace` +
+  `createTypeScriptProfile()` directly, or setting the env var by hand.
+- **`edit`/`move` have zero TS-specific integration tests.** The
+  `export_statement` range fix and the open-doc/`didChange` sync path are
+  unverified under an actual mutation through those verbs — only under raw
+  disk writes from outside the daemon, a different code path.
+- **Handle-lifecycle coverage is thin.** Only the declaration-merging `gone`
+  case exists. Rust's `handles.test.ts` covers unchanged / moved / edited /
+  deleted / rewritten-identically / unknown; TS has one of those six.
+- **Overload signatures aren't recognized as items at all** — only the
+  implementation is (`tree.items()` skips signature-only overload
+  declarations entirely). Found while building the fixture; not
+  investigated further. Could matter on real overload-heavy code.
+- **`KIND_MAP.typescript` is incomplete.** Unmapped raw kinds (e.g. a
+  parameter position) render as the generic `expr` fallback instead of
+  something like `param`. Cosmetic, not correctness — surfaced during the
+  dogfood run against treesense's own source.
+- **`qualifiedName`'s `::` join is still Rust-flavored** for TS symbolic
+  addresses. Works (tests pass), just not idiomatic — `Foo::bar` instead of
+  `Foo.bar`.
+- **No init-work/bundling for `typescript-language-server`** — deferred on
+  purpose (see above); the user provisions it themselves, mirroring
+  `rust-analyzer`. A possible future enhancement, not a gap to close by
+  default.
+- **No `vtsls`/raw-tsserver-protocol comparison** — deprioritized on purpose
+  once `useSyntaxServer: "never"` solved what it would have investigated.
+- **`README.md` still only documents the Rust setup** — nothing about the TS
+  profile, `FLUENT_LANG`, or how to point it at a project.
+
+Of these, reachability and the `edit`/`move` test gap are the two that
+actually matter before this is "done" rather than "working."
+
 ## Testing
 
 Two tiers, because one slow suite is a suite that stops being run.
