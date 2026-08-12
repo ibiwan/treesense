@@ -286,6 +286,31 @@ is still future work. Full suite: 18 unit + 85 integration (73 Rust + 12
 TypeScript), all green; the TypeScript suite skips cleanly with a message
 when `typescript-language-server` isn't on PATH, same as Rust's.
 
+**Closed the `edit`/`move`/handle-lifecycle coverage gap.** Three new files —
+`edit-typescript.test.ts` (11 tests), `move-typescript.test.ts` (10 tests),
+`handles-typescript.test.ts` (7 tests) — mirror the Rust suites' cases
+against `fixtures/typescript-project` rather than relying on the mechanism
+being language-independent (edit.ts/move.ts never touch the LSP client, only
+`syntax.ts`/`locate.ts`, so this was a real gap, not a redundant one). Two
+things surfaced that the Rust mirror alone couldn't have:
+- `itemRangeWithDocs`'s comment-attachment walk glues an unrelated leading
+  comment onto a JSDoc block when there's no blank line to stop at — visible
+  on `scale` specifically because its JSDoc opens the file with nothing above
+  it, unlike the Rust fixture's `scale`, which has a blank-line-separated
+  module header acting as a moat. Not a bug (the same rule is what makes a
+  real doc comment stick to its item), just a fixture-shape difference the
+  Rust test happened not to exercise — worth remembering if a future TS
+  fixture puts a declaration at the very top of a file.
+- The open-doc/`didChange` sync path (typescript.ts's central concern) now
+  has a real regression test in each of the two files: open a file via a
+  query, mutate it through our own `edit`/`move` verb, then issue a fresh
+  LSP-backed query and confirm it reflects the change rather than tsserver's
+  stale pre-edit buffer. `edit`/`move` themselves never touch the LSP client
+  — this is the only place that dropped `didChangeWatched` call would have
+  surfaced, and nothing exercised it before.
+
+Full suite is now 18 unit + 113 integration (73 Rust + 40 TypeScript).
+
 **Left undone.** In rough priority order:
 
 - **Not reachable from real usage.** `FLUENT_LANG` is a test-only override —
@@ -293,13 +318,6 @@ when `typescript-language-server` isn't on PATH, same as Rust's.
   documented way for an MCP client or CLI user to pick the TS profile. Today
   the only way to use it is constructing `Workspace` +
   `createTypeScriptProfile()` directly, or setting the env var by hand.
-- **`edit`/`move` have zero TS-specific integration tests.** The
-  `export_statement` range fix and the open-doc/`didChange` sync path are
-  unverified under an actual mutation through those verbs — only under raw
-  disk writes from outside the daemon, a different code path.
-- **Handle-lifecycle coverage is thin.** Only the declaration-merging `gone`
-  case exists. Rust's `handles.test.ts` covers unchanged / moved / edited /
-  deleted / rewritten-identically / unknown; TS has one of those six.
 - **Overload signatures aren't recognized as items at all** — only the
   implementation is (`tree.items()` skips signature-only overload
   declarations entirely). Found while building the fixture; not
@@ -320,8 +338,9 @@ when `typescript-language-server` isn't on PATH, same as Rust's.
 - **`README.md` still only documents the Rust setup** — nothing about the TS
   profile, `FLUENT_LANG`, or how to point it at a project.
 
-Of these, reachability and the `edit`/`move` test gap are the two that
-actually matter before this is "done" rather than "working."
+Of these, reachability is the one that actually matters before this is
+"done" rather than "working" — the rest are cosmetic or deliberately
+deferred.
 
 ## Testing
 
