@@ -311,13 +311,24 @@ things surfaced that the Rust mirror alone couldn't have:
 
 Full suite is now 18 unit + 113 integration (73 Rust + 40 TypeScript).
 
+**Closed the reachability gap.** `detect-language.ts` picks a profile from
+the workspace root's own manifests — `Cargo.toml` for Rust, `tsconfig.json`
+or bare `package.json` for TypeScript (JS projects routinely have no
+`tsconfig.json`, and the TS client already speaks JS/JSX) — checked at the
+root only, no walking up to an ancestor manifest. `index.ts`'s `main()` now
+calls it whenever `FLUENT_LANG` is unset; a root with both manifests picks
+Rust, a root with neither falls back to Rust with a note on stderr rather
+than refusing to start, and an unrecognized `FLUENT_LANG` value is reported
+and ignored rather than silently swallowed the way it was before (previously
+anything other than the literal string `"typescript"` fell through to Rust
+with no signal at all). 6 new unit tests in `detect-language.test.ts`, plus a
+manual smoke test of all three branches (`rust-workspace`, `typescript-
+project`, and an empty directory) against the built daemon binary. `README.md`
+gained a "Language profiles" section covering detection, the `FLUENT_LANG`
+override, and `FLUENT_TS_COMMAND`/`FLUENT_TS_TSSERVER_PATH`.
+
 **Left undone.** In rough priority order:
 
-- **Not reachable from real usage.** `FLUENT_LANG` is a test-only override —
-  there is no auto-detection (`tsconfig.json` vs `Cargo.toml`) and no
-  documented way for an MCP client or CLI user to pick the TS profile. Today
-  the only way to use it is constructing `Workspace` +
-  `createTypeScriptProfile()` directly, or setting the env var by hand.
 - **Overload signatures aren't recognized as items at all** — only the
   implementation is (`tree.items()` skips signature-only overload
   declarations entirely). Found while building the fixture; not
@@ -335,12 +346,9 @@ Full suite is now 18 unit + 113 integration (73 Rust + 40 TypeScript).
   default.
 - **No `vtsls`/raw-tsserver-protocol comparison** — deprioritized on purpose
   once `useSyntaxServer: "never"` solved what it would have investigated.
-- **`README.md` still only documents the Rust setup** — nothing about the TS
-  profile, `FLUENT_LANG`, or how to point it at a project.
 
-Of these, reachability is the one that actually matters before this is
-"done" rather than "working" — the rest are cosmetic or deliberately
-deferred.
+None of these block real usage — they're cosmetic, deliberately deferred, or
+scoped-out comparisons, not gaps in what ships today.
 
 ## Testing
 
@@ -349,13 +357,14 @@ Two tiers, because one slow suite is a suite that stops being run.
 | | | |
 |---|---|---|
 | `npm test` | unit | hermetic, ~400ms, needs nothing installed |
-| `npm run test:lsp` | integration | needs rust-analyzer on PATH; skips with a message if absent |
+| `npm run test:lsp` | integration | needs rust-analyzer and/or typescript-language-server on PATH; each half skips with a message if its server is absent |
 | `npm run test:all` | both | |
 
-Integration tests run against `fixtures/rust-workspace`, and **every run copies
-it to a tmpdir first**. Mutation is the whole point from M3 onward, and
-mutating the committed fixture in place would make runs non-repeatable, leave
-`git status` dirty, and break any two runs that overlap.
+Integration tests run against `fixtures/rust-workspace` and
+`fixtures/typescript-project`, and **every run copies its fixture to a tmpdir
+first**. Mutation is the whole point from M3 onward, and mutating a committed
+fixture in place would make runs non-repeatable, leave `git status` dirty,
+and break any two runs that overlap.
 
 The fixture is dependency-free on purpose — index time is dominated by
 dependencies, not by our own source, so a single `[dependencies]` entry would

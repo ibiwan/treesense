@@ -57,13 +57,30 @@ Addresses come in three forms: an opaque handle (`#317H`), a position
 latter two and can only echo the first. Nothing asks it to count bytes or
 columns.
 
+## Language profiles
+
+Two profiles exist today: Rust (`rust-analyzer`) and TypeScript/JavaScript
+(`typescript-language-server`). `fluentd` picks one automatically from the
+workspace root's own manifests — `Cargo.toml` selects Rust, `tsconfig.json`
+or `package.json` (no `tsconfig.json` required — plain JS projects count too)
+selects TypeScript. A root with both picks Rust; a root with neither also
+picks Rust, with a note on stderr. `FLUENT_LANG=rust` or
+`FLUENT_LANG=typescript` overrides detection outright.
+
+The TypeScript profile expects `typescript-language-server` on `PATH` — it is
+not bundled, the same way `rust-analyzer` is not. `FLUENT_TS_COMMAND` points
+at a different binary; `FLUENT_TS_TSSERVER_PATH` pins a specific `tsserver.js`
+(or its containing directory) when the target project's own `typescript`
+dependency ships none, e.g. `typescript@7`'s native-compiler rewrite.
+
 ## Status
 
 All seven verbs are implemented: `overview`, `read`, `refs`, `edit`, `find`, `move`, `trace`. Also
 in place: addresses; the file registry with generations and lazy staleness;
 the handle table including rebasing, identity-based relocation and the
 `changed:` / `gone` paths; UTF-16↔UTF-8 offset conversion; the ast-grep syntax
-layer; the rust-analyzer client.
+layer; the rust-analyzer and typescript-language-server clients, chosen by
+the detection described above.
 
 Symbolic addresses resolve in `refs` through `workspace/symbol`; ambiguous
 names return handle-bearing candidates rather than being guessed.
@@ -72,7 +89,9 @@ What's left is M7: dogfooding against a real workload to measure whether this
 actually costs fewer tokens than `grep`/`cat`. See [PLAN.md](PLAN.md).
 
 `npm test` is hermetic and fast; `npm run test:lsp` needs rust-analyzer and
-runs against a disposable copy of `fixtures/rust-workspace`. See
+typescript-language-server, and runs against disposable copies of
+`fixtures/rust-workspace` and `fixtures/typescript-project`. Either half
+skips cleanly with a message if its language server isn't on `PATH`. See
 [PLAN.md](PLAN.md) for milestones and [DESIGN.md](DESIGN.md) for the
 cross-cutting invariants.
 
@@ -87,7 +106,8 @@ npm run dev:mcp           # facade; autostarts the daemon if absent
 
 `FLUENT_ROOT` overrides the workspace root, `FLUENT_TARGET_DIR` gives
 rust-analyzer its own `target/` so cargo's exclusive lock is never contended
-with the editor's instance.
+with the editor's instance. `FLUENT_LANG` overrides language detection — see
+[Language profiles](#language-profiles).
 
 ## Suggested flow
 
