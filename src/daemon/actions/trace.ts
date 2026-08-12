@@ -42,13 +42,14 @@ import { renderSite } from "../../shared/render.js";
 import type { Reply } from "../../shared/protocol.js";
 import type { FilePath, Site, StopReason } from "../../shared/types.js";
 import { locate, mint, questionNode, type Located } from "../locate.js";
-import { pathToUri, uriToPath } from "../lsp.js";
+import { pathToUri, uriToPath } from "../lsp-client.js";
 import { byteToPosition, positionToByte } from "../positions.js";
 import {
   boundName,
   boundValue,
   callWithin,
   candidateNames,
+  parametersOf,
   returnValues,
   type Language,
   type SyntaxNode,
@@ -422,8 +423,8 @@ function parameterSlot(
 ): { fn: SyntaxNode; index: number } | null {
   for (const ancestor of located.tree.ancestors(node)) {
     if (ancestor.kind !== "fn") continue;
-    const params = ancestor.children().find((c) => c.rawKind === "parameters");
-    if (params === undefined) return null;
+    const params = parametersOf(located.tree.language, ancestor);
+    if (params === null) return null;
     const index = params
       .children()
       .findIndex((p) => p.bytes.start <= node.bytes.start && node.bytes.end <= p.bytes.end);
@@ -475,7 +476,7 @@ async function parameterFor(
   if (resolved === null) return null;
   const target = resolved.located;
 
-  const params = resolved.node.children().find((c) => c.rawKind === "parameters");
+  const params = parametersOf(target.tree.language, resolved.node);
   const param = params?.children()[index];
   if (param === undefined) return null;
 

@@ -26,6 +26,9 @@ import { overview } from "./actions/overview.js";
 import { read } from "./actions/read.js";
 import { refs } from "./actions/refs.js";
 import { trace } from "./actions/trace.js";
+import { detectLanguage, type Lang } from "./detect-language.js";
+import { createRustProfile } from "./languages/rust.js";
+import { createTypeScriptProfile } from "./languages/typescript.js";
 import { registerLanguages } from "./syntax.js";
 import { Workspace } from "./workspace.js";
 
@@ -114,6 +117,19 @@ function isServed(path: string): Promise<boolean> {
   });
 }
 
+/**
+ * `FLUENT_LANG`, validated. An unrecognized value is reported rather than
+ * silently falling through to detection — a typo'd override should not look
+ * like a detection result the user never asked for.
+ */
+function explicitLang(): Lang | undefined {
+  const raw = process.env.FLUENT_LANG;
+  if (raw === undefined) return undefined;
+  if (raw === "rust" || raw === "typescript") return raw;
+  process.stderr.write(`fluentd: FLUENT_LANG=${raw} is not "rust" or "typescript"; ignoring\n`);
+  return undefined;
+}
+
 function isServedTcp(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = connect(port, TCP_HOST);
@@ -144,7 +160,32 @@ async function main(): Promise<void> {
   const useTcp = !useStdio && Number.isInteger(tcpPort) && tcpPort > 0;
   const socketPath = useStdio || useTcp ? undefined : socketPathFor(root);
 
-  const ws = new Workspace(root, targetDir);
+  // FLUENT_LANG is an explicit override, checked first; absent that, the
+  // profile is detected from the root's own manifests (Cargo.toml vs
+  // tsconfig.json/package.json — see detect-language.ts). Neither manifest
+  // present falls back to Rust, the longer-established profile, rather than
+  // refusing to start.
+  const explicit = explicitLang();
+  const detected = explicit === undefined ? await detectLanguage(root) : null;
+  const lang: Lang = explicit ?? detected ?? "rust";
+  if (explicit === undefined) {
+    process.stderr.write(
+      detected === null
+        ? `fluentd: no Cargo.toml, tsconfig.json, or package.json at ${root}; `
+          + `defaulting to the Rust profile. Set FLUENT_LANG=typescript to override.\n`
+        : `fluentd: detected a ${detected} project at ${root}\n`,
+    );
+  }
+
+  const tsserverPath = process.env.FLUENT_TS_TSSERVER_PATH;
+  const tsCommand = process.env.FLUENT_TS_COMMAND;
+  const profile = lang === "typescript"
+    ? createTypeScriptProfile({
+        ...(tsCommand === undefined ? {} : { command: tsCommand }),
+        ...(tsserverPath === undefined ? {} : { tsserverPath }),
+      })
+    : createRustProfile(targetDir === undefined ? {} : { targetDir });
+  const ws = new Workspace(root, profile);
 
   if (useStdio) {
     handle(ws, process.stdin, process.stdout);

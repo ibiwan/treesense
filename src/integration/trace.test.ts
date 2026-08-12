@@ -81,7 +81,7 @@ describe("trace", { skip }, () => {
     // `borrowed(&parcel.payload)` could mean either name. Tracing the CONTAINER
     // reaches the callee too — a candidate the reader can discard, where a
     // dropped edge would be invisible.
-    const parcel = await handleFor("src/pipeline.rs:59", "parcel");
+    const parcel = await handleFor("src/pipeline.rs:61", "parcel");
     const res = await fx.rpc({ op: "trace", target: parcel, maxUp: 0, maxDown: 2 });
     assert.ok(res.ok, res.text);
     assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `container followed:\n${res.text}`);
@@ -117,7 +117,7 @@ describe("trace", { skip }, () => {
     // `borrowed(&seed)` — `&mut`/`&`/parens/`.clone()` change the type, not
     // which name is flowing. Stopping at the wrapper strands a Rust trace at
     // the first argument it meets.
-    const seed = await handleFor("src/pipeline.rs:40", "seed");
+    const seed = await handleFor("src/pipeline.rs:42", "seed");
     const res = await fx.rpc({ op: "trace", target: seed, maxUp: 0, maxDown: 2 });
     assert.ok(res.ok, res.text);
     assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `peeled borrow:\n${res.text}`);
@@ -125,7 +125,7 @@ describe("trace", { skip }, () => {
 
   test("decoration is peeled through a zero-argument method call", async () => {
     // `borrowed(&(seed.clone()))` — three wrappers deep, one name underneath.
-    const seed = await handleFor("src/pipeline.rs:40", "seed");
+    const seed = await handleFor("src/pipeline.rs:42", "seed");
     const res = await fx.rpc({ op: "trace", target: seed, maxUp: 0, maxDown: 2 });
     assert.ok(res.ok, res.text);
     // Both call sites converge on the same parameter, so the second arrival is
@@ -138,7 +138,7 @@ describe("trace", { skip }, () => {
   test("a name bound from a call traces up into what that call returns", async () => {
     // `let one = borrowed(&seed)` — the value's origin is `borrowed`'s tail
     // expression. Following arguments alone loses every `let x = f(..)`.
-    const one = await handleFor("src/pipeline.rs:41", "one");
+    const one = await handleFor("src/pipeline.rs:42", "one");
     const res = await fx.rpc({ op: "trace", target: one, maxUp: 2, maxDown: 0 });
     assert.ok(res.ok, res.text);
     assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `return hop:\n${res.text}`);
@@ -147,20 +147,22 @@ describe("trace", { skip }, () => {
   test("a returned value traces down into the caller's binding", async () => {
     // The inverse hop: `carried` leaves `borrowed` via `*carried`, arriving as
     // `one` and `two` in the caller.
-    const carried = await handleFor("src/pipeline.rs:48", "carried");
+    const carried = await handleFor("src/pipeline.rs:49", "carried");
     const res = await fx.rpc({ op: "trace", target: carried, maxUp: 0, maxDown: 2 });
     assert.ok(res.ok, res.text);
     assert.match(res.text, /ident one\b/, `bound in caller:\n${res.text}`);
     assert.match(res.text, /ident two\b/, `both call sites:\n${res.text}`);
   });
 
-  test("a return that denotes no single name stops, saying so", async () => {
-    // `scale`'s tail is `value * factor`. Neither operand alone is the return
-    // value, and the walk must not pick one — same rule as `f(x + 1)`.
+  test("a return expression offers each candidate operand", async () => {
+    // `scale`'s tail is `value * factor`. The permissive tracer reports both
+    // candidate origins rather than silently discarding an edge.
     const scaled = await handleFor("src/main.rs:16", "scaled");
     const res = await fx.rpc({ op: "trace", target: scaled, maxUp: 2, maxDown: 0 });
     assert.ok(res.ok, res.text);
-    assert.match(res.text, /stop:return/, `honest about the tail:\n${res.text}`);
+    assert.match(res.text, /ident value\b/, res.text);
+    assert.match(res.text, /ident factor\b/, res.text);
+    assert.doesNotMatch(res.text, /stop:return/, res.text);
   });
 
   test("an ambiguous position is refused rather than guessed", async () => {

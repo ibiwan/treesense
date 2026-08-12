@@ -184,6 +184,24 @@ const PEEL: Record<Language, PeelTable> = {
 /** Runaway guard: real decoration nests a few deep, never dozens. */
 const MAX_PEEL = 12;
 
+
+/**
+ * Raw kind of a function declaration's parameter list — diverges per
+ * grammar. tree-sitter-rust calls it `parameters`; tree-sitter-typescript
+ * (and JS/TSX, which share its shape) calls it `formal_parameters`.
+ */
+const PARAMETERS_KIND: Record<Language, string> = {
+  rust: "parameters",
+  typescript: "formal_parameters",
+  javascript: "formal_parameters",
+  tsx: "formal_parameters",
+};
+
+/** The parameter-list node of a function-kind declaration, or null if none is found. */
+export function parametersOf(lang: Language, fn: SyntaxNode): SyntaxNode | null {
+  return fn.children().find((c) => c.rawKind === PARAMETERS_KIND[lang]) ?? null;
+}
+
 /** Never report more names from one expression than a reader will scan. */
 const MAX_CANDIDATES = 8;
 
@@ -607,14 +625,41 @@ class Tree implements SyntaxTree {
     for (const a of this.ancestors(node)) {
       if (isItemKind(a.kind)) return a;
     }
-    return null;
+    // TS/JS wrap a declaration in an `export_statement` whose own span starts
+    // at the `export` keyword, before the declaration it wraps. A position
+    // landing in that keyword span (LSP symbol search returns exactly this —
+    // the start of the whole exported declaration) resolves via `nodeAt` to
+    // the wrapper itself: it is the smallest NAMED node containing that byte,
+    // since the wrapped declaration's own range starts later. The wrapper has
+    // no item-kind ancestors (it's usually near the top of the file) and,
+    // being a statement rather than a declaration, is not an item itself —
+    // so climbing stops with nothing, even though the real declaration is
+    // sitting one level down. Rust has no such wrapper: a visibility modifier
+    // is a child token of the item itself, never a separate enclosing node.
+    return node.children().find((c) => isItemKind(c.kind)) ?? null;
   }
 
   itemRangeWithDocs(node: SyntaxNode): ByteRange {
     const sg = (node as Node).raw;
-    let start = node.bytes.start;
 
-    for (let prev = sg.prev(); prev !== null; prev = prev.prev()) {
+    // TS/JS wrap a lone declaration in an `export_statement`, contributing a
+    // leading "export"/"export default" the declaration's own range
+    // excludes. That prefix is real text belonging to the declaration — a
+    // move or edit using the bare range would leave the keyword behind as an
+    // orphan token — and a doc comment precedes the wrapper, not the
+    // declaration nested inside it, so the backward walk for docs has to
+    // start there too: `sg.prev()` alone finds nothing, since the
+    // declaration has no siblings of its own, and a comment sitting right
+    // above `export function foo` would be reported detached.
+    const parent = sg.parent();
+    const wrapped = parent !== null
+      && !isItemKind(normaliseKind(this.language, String(parent.kind())))
+      && parent.children().filter((c) => c.isNamed()).length === 1;
+    const anchor = wrapped ? parent! : sg;
+
+    let start = this.offsets.toBytes(anchor.range().start.index);
+
+    for (let prev = anchor.prev(); prev !== null; prev = prev.prev()) {
       if (!DOC_KINDS.has(String(prev.kind()))) break;
       const prevRange = {
         start: this.offsets.toBytes(prev.range().start.index),

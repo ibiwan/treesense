@@ -82,6 +82,24 @@ test("enclosingItem climbs to the declaration", () => {
   assert.equal(item.name, "count");
 });
 
+test("enclosingItem sees through an export_statement wrapper", () => {
+  // LSP symbol search returns a position at the very start of the exported
+  // declaration -- the `export` keyword itself, which precedes where the
+  // wrapped function_declaration's own range begins. nodeAt lands on the
+  // export_statement wrapper, which has no item-kind ancestors; the real
+  // item is one level down, not up.
+  const ts = "export function helperFn(x: number): number {\n  return x * 2;\n}\n";
+  const tree = parse(Buffer.from(ts, "utf8"), "typescript");
+  const node = tree.nodeAt(0);
+  assert.ok(node !== null);
+  assert.equal(node.rawKind, "export_statement");
+
+  const item = tree.enclosingItem(node);
+  assert.ok(item !== null);
+  assert.equal(item.kind, "fn");
+  assert.equal(item.name, "helperFn");
+});
+
 test("item range absorbs doc comments and attributes", () => {
   // Replacing a function without its doc comment strands the comment
   // describing the old signature — and it still parses, so nothing catches it.
