@@ -19,3 +19,17 @@ The concrete suggestion I'd offer: have edit return handles for the nodes it cre
 
 A fluent finding from doing this myself, and a sharp one: I targeted the corner check via a handle find reported as #X7 [geometry.rs::expr] :116 — the snippet it showed me was the comment line, so I assumed the handle covered the comment and its if. It covered only the single line. My replace inserted the new check and left the old one intact, producing two consecutive guards.
 
+## Test environment — TypeScript LSP
+
+`npm run test:all` is green with the Rust toolchain present (72 pass, 3 skip
+on 2026-08-11). The skipped TypeScript integration suites need
+`typescript-language-server` on `PATH`; install and exercise that server next
+time rather than treating the skip as TypeScript validation.
+
+In this restricted environment, Unix-domain socket binding can be unavailable.
+The integration harness then uses `FLUENT_STDIO=1` for the long-lived daemon;
+that still exercises daemon actions but skips the MCP-facade socket tests
+(`stdio fallback: the facade cannot dial a socket`). Re-run the facade tests
+where a Unix socket can bind after installing the TypeScript server. For a
+manual daemon check, build first, start `dist/daemon/index.js` with the target
+root in one terminal, then create a fresh MCP task so the facade reconnects.
