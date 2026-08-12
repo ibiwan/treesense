@@ -184,50 +184,98 @@ const PEEL: Record<Language, PeelTable> = {
 /** Runaway guard: real decoration nests a few deep, never dozens. */
 const MAX_PEEL = 12;
 
-/**
- * The single identifier an expression denotes, or null when it denotes no one
- * name — `a + b`, a literal, a call with arguments.
- *
- * Null is a real answer and the caller must report it. Guessing a name out of
- * `seed + 1` would make the trace claim a flow the syntax does not support.
- */
-export function principalName(lang: Language, node: SyntaxNode): SyntaxNode | null {
-  const table = PEEL[lang];
-  let cur: SyntaxNode | null = node;
+/** Never report more names from one expression than a reader will scan. */
+const MAX_CANDIDATES = 8;
 
-  for (let depth = 0; cur !== null && depth < MAX_PEEL; depth++) {
-    if (cur.kind === "ident") return cur;
+/**
+ * Every identifier an expression might denote, best guess first.
+ *
+ * PERMISSIVE BY DESIGN. `&mut x`, `(x)` and `x.clone()` denote exactly `x`, but
+ * `item.fields` plausibly means either the field or its container, and
+ * `seed + 1` plausibly means `seed`. All of them are returned rather than
+ * adjudicated.
+ *
+ * The asymmetry that justifies it: a reader discards a wrong candidate at a
+ * glance, but cannot detect a flow that was silently dropped. Over-reporting
+ * costs a line; under-reporting costs a wrong conclusion. So this errs toward
+ * including, and `trace` documents that its edges are candidates.
+ *
+ * Order is a hint, never a filter — the name an expression most likely denotes
+ * comes first, and callers that want just that one may take `[0]`.
+ *
+ * An empty array still means what it says: no name in there at all.
+ */
+export function candidateNames(lang: Language, node: SyntaxNode): SyntaxNode[] {
+  const table = PEEL[lang];
+  const out: SyntaxNode[] = [];
+
+  const add = (found: SyntaxNode): void => {
+    if (out.length >= MAX_CANDIDATES) return;
+    if (out.some((seen) => seen.bytes.start === found.bytes.start)) return;
+    out.push(found);
+  };
+
+  const walk = (cur: SyntaxNode, depth: number): void => {
+    if (depth > MAX_PEEL || out.length >= MAX_CANDIDATES) return;
+    if (cur.kind === "ident") {
+      add(cur);
+      return;
+    }
     const raw = cur.rawKind;
 
+    // Pure decoration: exactly one name underneath, no ambiguity to report.
     if (table.wrappers.has(raw)) {
-      cur = cur.children().at(-1) ?? null;
-      continue;
+      const inner = cur.children().at(-1);
+      if (inner !== undefined) walk(inner, depth + 1);
+      return;
     }
 
-    // A zero-argument method continues the value's story under a different
-    // type: `x.clone()`, `x.to_string()`, `x.toString()`. The value is the
-    // RECEIVER, not the method name — so this must be tested before the path
-    // rule below, which would otherwise hand back `clone`.
     if (raw === table.call) {
-      const kids: SyntaxNode[] = cur.children();
-      const callee: SyntaxNode | undefined = kids[0];
-      const args: SyntaxNode | undefined = kids[1];
-      if (callee === undefined) return null;
-      // Any argument means the result is computed from more than the receiver.
-      if (args?.rawKind === table.args && args.children().length > 0) return null;
-      if (!table.paths.has(callee.rawKind)) return null;
-      cur = callee.children()[0] ?? null;
-      continue;
+      const kids = cur.children();
+      const callee = kids[0];
+      const args = kids[1];
+      if (callee === undefined) return;
+      const hasArgs = args?.rawKind === table.args && args.children().length > 0;
+      // A zero-argument method continues the receiver's story under a different
+      // type: `x.clone()`, `x.toString()`. The receiver is the value, which is
+      // why this precedes the path rule — that would offer `clone` instead.
+      if (!hasArgs && table.paths.has(callee.rawKind)) {
+        const receiver = callee.children()[0];
+        if (receiver !== undefined) walk(receiver, depth + 1);
+        return;
+      }
+      // A call with arguments produces a NEW value. Its arguments did not flow
+      // into the enclosing position, so offering them would be a false edge
+      // even by permissive standards — the callee's return is the real link,
+      // and `stepDownThroughReturn` is what follows it.
+      return;
     }
 
+    // Dotted access: the field is the likelier reading, the container the
+    // plausible one. Rightmost first, then outward.
     if (table.paths.has(raw)) {
-      cur = cur.children().at(-1) ?? null;
-      continue;
+      const kids = cur.children();
+      for (let i = kids.length - 1; i >= 0; i--) walk(kids[i]!, depth + 1);
+      return;
     }
 
-    return null;
-  }
-  return null;
+    // Anything else — arithmetic, comparison, a tuple, an array literal. Every
+    // name inside it is a candidate: `seed + 1` offers `seed`.
+    for (const child of cur.children()) walk(child, depth + 1);
+  };
+
+  walk(node, 0);
+  return out;
+}
+
+/**
+ * The likeliest single name, or null when the expression names nothing.
+ *
+ * A convenience over `candidateNames` for callers that genuinely need one
+ * answer. Prefer the full list wherever a caller can carry several.
+ */
+export function principalName(lang: Language, node: SyntaxNode): SyntaxNode | null {
+  return candidateNames(lang, node)[0] ?? null;
 }
 
 /**

@@ -62,11 +62,37 @@ describe("trace", { skip }, () => {
     assert.match(res.text, /stop:macro/, res.text);
   });
 
-  test("a non-identifier argument is a stop, not an ending", async () => {
-    // `scale(seed + 1, step)` — the argument is an expression, so following it
-    // would need to know what `+` does with the value.
+  test("an operator does not hide the name behind it", async () => {
+    // `scale(seed + 1, step)` — permissive by design: the value arriving at
+    // `scale` is derived from `seed`, and reporting that beats staying silent
+    // because `+` is in the way.
     const scaled = await handleFor("src/main.rs:16", "scaled");
     const res = await fx.rpc({ op: "trace", target: scaled, maxUp: 0, maxDown: 3 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /helper\/src\/lib\.rs:\d+ ident value/, res.text);
+    assert.doesNotMatch(
+      res.text,
+      /pipeline\.rs:19 .*stop:non-ident-arg/,
+      `the operand should be followed, not refused:\n${res.text}`,
+    );
+  });
+
+  test("a path offers its container as well as its field", async () => {
+    // `borrowed(&parcel.payload)` could mean either name. Tracing the CONTAINER
+    // reaches the callee too — a candidate the reader can discard, where a
+    // dropped edge would be invisible.
+    const parcel = await handleFor("src/pipeline.rs:59", "parcel");
+    const res = await fx.rpc({ op: "trace", target: parcel, maxUp: 0, maxDown: 2 });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /pipeline\.rs:\d+ ident carried/, `container followed:\n${res.text}`);
+  });
+
+  test("an argument with no name in it says so rather than ending", async () => {
+    // `clamp(total, 100)` — the second argument is a literal. There is no name
+    // to offer, and that is a stop with a reason, not a silent terminus.
+    const ceiling = await handleFor("crates/helper/src/lib.rs:18", "ceiling");
+    const res = await fx.rpc({ op: "trace", target: ceiling, maxUp: 2, maxDown: 0 });
+    assert.ok(res.ok, res.text);
     assert.match(res.text, /stop:non-ident-arg/, res.text);
   });
 

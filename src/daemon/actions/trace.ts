@@ -12,19 +12,23 @@
  *         filtered to call sites, taking the argument in that slot; and a name
  *         bound from a call resolves back to what that call returns.
  *
- * This is a NAME tracer. `&mut x`, `(x)`, `x?` and `x.clone()` all denote x, so
- * decoration is peeled before asking what an expression names (see
- * `principalName`). Refusing to see through a borrow stops a Rust trace almost
- * immediately, which is a false negative dressed as an answer.
+ * This is a NAME tracer, and it is PERMISSIVE ON PURPOSE. `&mut x`, `(x)`, `x?`
+ * and `x.clone()` all denote x; `item.fields` might mean the field or its
+ * container; `f(x + 1)` might mean x. Every reading is followed (see
+ * `candidateNames`), so the result is a list of CANDIDATE flows — some of which
+ * may not exist at runtime.
  *
- * What it will not do is invent a name where the syntax gives none: `f(x + 1)`
- * and a `value * factor` tail stop, with a reason, rather than guessing which
- * operand mattered.
+ * That trade is deliberate and runs one way only. A reader discards a wrong
+ * edge at a glance but cannot detect one that was silently dropped, so a false
+ * positive costs a line and a false negative costs a wrong conclusion. Refusing
+ * to see through a borrow, which is where this verb started, stopped a Rust
+ * trace almost immediately — a false negative dressed as an answer.
  *
- * The requirement that makes it trustworthy: EVERY terminated branch states
- * why it stopped. A branch that halted at a macro must never be
- * indistinguishable from one that genuinely ended, because the caller reads a
- * short tree as a complete answer either way.
+ * What stays strict is the OTHER axis. Being generous about which edges exist
+ * must never make the walk generous about claiming it finished: EVERY
+ * terminated branch states why it stopped, and a branch that failed to resolve
+ * must never render as one that genuinely ended. Permissive about edges, exact
+ * about completeness.
  *
  * DELIBERATELY NAIVE. Out of scope, and visible in the output rather than by
  * omission: aliasing, destructuring, method receivers (a receiver is not yet
@@ -44,7 +48,7 @@ import {
   boundName,
   boundValue,
   callWithin,
-  principalName,
+  candidateNames,
   returnValues,
   type Language,
   type SyntaxNode,
@@ -212,7 +216,10 @@ async function stepDown(ws: Workspace, from: Frontier): Promise<Step[]> {
       out.push(...(await stepDownThroughReturn(ws, here)));
       continue;
     }
-    if (!slot.bare) {
+    if (!slot.carries) {
+      // The argument names something, but not this. Reached only via a name
+      // that is inside the argument without being one of its candidates —
+      // a callee name, say.
       out.push({ at: here, stop: "non-ident-arg" });
       continue;
     }
@@ -238,13 +245,12 @@ async function stepDownThroughReturn(ws: Workspace, from: Frontier): Promise<Ste
   const fn = enclosingFn(from.located, from.node);
   if (fn === null) return [];
 
-  // Only the name the return expression DENOTES leaves the function. In
-  // `value * factor` neither name does, on the same rule that stops the walk
-  // at `scale(seed + 1, ..)`.
-  const leaves = returnValues(lang, fn).some((expr) => {
-    const name = principalName(lang, expr);
-    return name !== null && name.bytes.start === from.node.bytes.start;
-  });
+  // Permissive: any name a return expression could denote leaves with it. Both
+  // operands of a `value * factor` tail count, on the same rule that lets
+  // `scale(seed + 1, ..)` carry `seed`.
+  const leaves = returnValues(lang, fn).some((expr) =>
+    candidateNames(lang, expr).some((n) => n.bytes.start === from.node.bytes.start),
+  );
   if (!leaves) return [];
 
   const fnName = fn.nameNode;
@@ -319,12 +325,15 @@ async function stepUp(ws: Workspace, from: Frontier): Promise<Step[]> {
       continue;
     }
 
-    const named = principalName(located.tree.language, actual);
-    if (named === null) {
+    const named = candidateNames(located.tree.language, actual);
+    if (named.length === 0) {
       out.push({ at: { located, node: actual, distance: from.distance }, stop: "non-ident-arg" });
       continue;
     }
-    out.push({ to: { located, node: named, distance: from.distance } });
+    // Every name the argument could denote is a supplier worth reporting.
+    for (const name of named) {
+      out.push({ to: { located, node: name, distance: from.distance } });
+    }
   }
   return out;
 }
@@ -352,10 +361,17 @@ async function stepUpThroughBinding(ws: Workspace, from: Frontier): Promise<Step
 
   const out: Step[] = [];
   for (const expr of exprs) {
-    const name = principalName(calleeLang, expr);
-    const here: Frontier = { located: callee.located, node: name ?? expr, distance: from.distance };
-    if (name === null) out.push({ at: here, stop: "return" });
-    else out.push({ to: here });
+    const names = candidateNames(calleeLang, expr);
+    if (names.length === 0) {
+      out.push({
+        at: { located: callee.located, node: expr, distance: from.distance },
+        stop: "return",
+      });
+      continue;
+    }
+    for (const name of names) {
+      out.push({ to: { located: callee.located, node: name, distance: from.distance } });
+    }
   }
   return out;
 }
@@ -373,7 +389,7 @@ async function stepUpThroughBinding(ws: Workspace, from: Frontier): Promise<Step
 function argumentSlot(
   lang: Language,
   node: SyntaxNode,
-): { call: SyntaxNode; index: number; bare: boolean } | null {
+): { call: SyntaxNode; index: number; carries: boolean } | null {
   // Bounded so a node outside any call walks out to nothing rather than to the
   // top of the file.
   let arg = node;
@@ -389,9 +405,10 @@ function argumentSlot(
   const call = list.parent;
   if (call === null || index < 0) return null;
 
-  const principal = principalName(lang, arg);
-  const bare = principal !== null && principal.bytes.start === node.bytes.start;
-  return { call, index, bare };
+  // Permissive: any name this argument could denote carries the value, not
+  // only the likeliest one. `item.fields` carries both `fields` and `item`.
+  const carries = candidateNames(lang, arg).some((n) => n.bytes.start === node.bytes.start);
+  return { call, index, carries };
 }
 
 /** An argument list is inside an expression; crossing these means we left it. */

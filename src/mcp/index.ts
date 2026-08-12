@@ -174,7 +174,7 @@ async function main(): Promise<void> {
   server.registerTool(
     "trace",
     {
-      description: "Follow a value up or down the call chain. Waits for the semantic index; supports handles and positions, not symbolic names. Example: trace({target: \"#6B\", maxDown: 2}). Naive: every branch reports why it stopped.",
+      description: "Follow a value up or down the call chain. Waits for the semantic index; supports handles and positions, not symbolic names. Example: trace({target: \"#6B\", maxDown: 2}). Naive and deliberately permissive: it peels decoration (&mut x, (x), x?, x.clone()) and offers every name an expression could denote, so item.fields follows both the field and its container and f(x + 1) follows x. Results are CANDIDATE flows — expect some that do not exist at runtime, and discard them. The guarantee runs the other way: every branch reports why it stopped, so a branch that could not be resolved never looks like one that genuinely ended.",
       outputSchema: OUTPUT_SHAPE,
       inputSchema: {
         target: z.string().describe(HANDLE_OR_POSITION),
