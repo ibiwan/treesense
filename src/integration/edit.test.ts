@@ -181,6 +181,48 @@ describe("edit", { skip }, () => {
     assert.match(read.text, /Doubles a värde/, "the doc comment belongs to the item");
   });
 
+  test("inserting several sibling declarations mints one handle per item", async () => {
+    // A caller's content is not required to be a single declaration —
+    // inserting a batch of functions is a normal ask. Minting only one handle
+    // for the first would force a `find` round trip to recover the others.
+    const handle = await scaleHandle();
+    const res = await fx.rpc({
+      op: "edit",
+      target: handle,
+      action: "insert-after",
+      content:
+        "pub fn one(value: u32) -> u32 {\n    value + 1\n}\n\npub fn two(value: u32) -> u32 {\n    value + 2\n}",
+    });
+    assert.ok(res.ok, res.text);
+    const lines = res.text.split("\n");
+    assert.equal(lines.length, 2, `expected one handle per item:\n${res.text}`);
+    assert.match(lines[0]!, /fn one/, res.text);
+    assert.match(lines[1]!, /fn two/, res.text);
+
+    for (const line of lines) {
+      const h = line.match(/^(#\w+)/)?.[1];
+      assert.ok(h, line);
+      const back = await fx.rpc({ op: "refs", target: h! });
+      assert.ok(back.ok, back.text);
+    }
+  });
+
+  test("an item's own nested declarations fold into its handle, not their own", async () => {
+    // A `mod` carrying its own nested fns is still one introduced item, not
+    // one-plus-however-many it happens to contain.
+    const handle = await scaleHandle();
+    const res = await fx.rpc({
+      op: "edit",
+      target: handle,
+      action: "insert-after",
+      content: "mod extra {\n    pub fn a() {}\n    pub fn b() {}\n}",
+    });
+    assert.ok(res.ok, res.text);
+    const lines = res.text.split("\n");
+    assert.equal(lines.length, 1, `expected exactly one handle for the mod:\n${res.text}`);
+    assert.match(lines[0]!, /mod extra/, res.text);
+  });
+
   test("the reply handle is exact enough to feed back into refs", async () => {
     const handle = await scaleHandle();
     const res = await fx.rpc({

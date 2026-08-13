@@ -101,6 +101,18 @@ path is the `TODO(relocate)` already sitting in `handles.ts`.
 **Verified by:** an edit that shifts other outstanding handles, asserting they
 rebase rather than die; and a rejection where a dep changed underneath.
 
+**Handle granularity on multi-item content (fixed).** Dogfooding surfaced a
+real gap, recorded in REVIEW_NOTES.md: inserting several sibling declarations
+in one `edit` minted only one handle — for whichever item's start happened to
+match the splice offset exactly, or a coarse fallback node if none did —
+forcing a `find` round trip to recover precise handles for the rest.
+`outcome()` in `edit.ts` now mints one handle per top-level item actually
+introduced within the splice's span, folding any item's own nested
+declarations (a `fn` inside a freshly inserted `mod`) into that item's single
+handle rather than reporting them separately. `move` still reports exactly
+one handle, since it only ever relocates a single existing node. Covered by
+two new cases in `edit.test.ts`.
+
 ## M5 — `find`
 
 **Done.** Shape dispatch on the needle, ast-grep patterns, hierarchy-grouped

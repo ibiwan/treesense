@@ -135,11 +135,13 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
   );
 
   const fresh = await locate(ws, target.full.file);
-  const introduced = fresh === null ? null : outcome(fresh, splice.contentAt, args.action);
+  const introduced = fresh === null ? [] : outcome(fresh, splice, args.action);
   const summary =
-    fresh === null || introduced === null
+    fresh === null || introduced.length === 0
       ? `${target.full.file}:${snap.index.lineAt(splice.contentAt)} ok`
-      : handlePlus(mint(ws, fresh, introduced), { withPath: true, root: ws.root });
+      : introduced
+          .map((node) => handlePlus(mint(ws, fresh, node), { withPath: true, root: ws.root }))
+          .join("\n");
 
   const dead = killed.filter((handle) => handle !== address.handle);
   const lines = [summary];
@@ -152,7 +154,7 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
 }
 
 /**
- * The node worth handing back after a successful edit.
+ * The nodes worth handing back after a successful edit.
  *
  * Not simply `nodeAt(start)`, for two different reasons:
  *
@@ -163,20 +165,43 @@ export async function edit(ws: Workspace, args: EditArgs): Promise<Reply> {
  *   delete         — nothing was introduced, and whatever now sits at that
  *                    offset merely slid up into the gap. The enclosing scope
  *                    answers "where am I now" instead.
+ *
+ * A caller's `content` is not required to be one declaration — inserting
+ * three sibling functions in one edit is a normal thing to ask for. Minting
+ * only one handle for that would force a `find` round trip to recover
+ * precise handles for the other two, defeating the point of reporting one at
+ * all. So every item introduced within `[contentAt, contentEnd)` gets its own
+ * handle, at whatever granularity it was created — except items nested
+ * inside another introduced item (a fn inside a freshly inserted `mod`),
+ * which stay folded into their container rather than doubly reported.
  */
 export function outcome(
   fresh: Located,
-  offset: number,
+  splice: Pick<Splice, "contentAt" | "contentEnd">,
   action: EditAction,
-): SyntaxNode | null {
-  const at = fresh.tree.nodeAt(offset);
-  if (at === null) return null;
-  if (action === "delete") return fresh.tree.enclosingItem(at);
+): SyntaxNode[] {
+  if (action === "delete") {
+    const at = fresh.tree.nodeAt(splice.contentAt);
+    if (at === null) return [];
+    const enclosing = fresh.tree.enclosingItem(at);
+    return enclosing === null ? [] : [enclosing];
+  }
 
-  const introduced = fresh.tree
+  const within = fresh.tree
     .items()
-    .find((item) => fresh.tree.itemRangeWithDocs(item).start === offset);
-  return introduced ?? at;
+    .filter((item) => {
+      const start = fresh.tree.itemRangeWithDocs(item).start;
+      return start >= splice.contentAt && start < splice.contentEnd;
+    });
+  const top = within.filter(
+    (item) => !within.some(
+      (other) => other !== item && other.bytes.start <= item.bytes.start && other.bytes.end >= item.bytes.end,
+    ),
+  );
+  if (top.length > 0) return top.sort((a, b) => a.bytes.start - b.bytes.start);
+
+  const at = fresh.tree.nodeAt(splice.contentAt);
+  return at === null ? [] : [at];
 }
 
 export interface Splice {
@@ -185,6 +210,9 @@ export interface Splice {
   /** Where the caller's content actually begins, which is not always where
    *  the splice does. Used only for reporting the outcome. */
   contentAt: number;
+  /** Where the caller's content ends, in the post-splice buffer. Together
+   *  with `contentAt`, the span `outcome` searches for introduced items. */
+  contentEnd: number;
 }
 
 /**
@@ -204,15 +232,23 @@ export function build(
   const indent = baseIndent(content, target.bytes.start) ?? "";
   const body = reindent(text, indent);
 
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+
   switch (action) {
     case "replace":
-      return { range: target.bytes, text: body, contentAt: target.bytes.start };
+      return {
+        range: target.bytes,
+        text: body,
+        contentAt: target.bytes.start,
+        contentEnd: target.bytes.start + bodyBytes,
+      };
 
     case "insert-before":
       return {
         range: { start: target.bytes.start, end: target.bytes.start },
         text: `${body}\n${indent}`,
         contentAt: target.bytes.start,
+        contentEnd: target.bytes.start + bodyBytes,
       };
 
     case "insert-after": {
@@ -220,10 +256,12 @@ export function build(
       // where the splice does — and reporting the splice offset lands between
       // nodes, which resolves to the whole file.
       const lead = Buffer.byteLength(`\n${indent}`, "utf8");
+      const contentAt = target.bytes.end + lead;
       return {
         range: { start: target.bytes.end, end: target.bytes.end },
         text: `\n${indent}${body}`,
-        contentAt: target.bytes.end + lead,
+        contentAt,
+        contentEnd: contentAt + bodyBytes,
       };
     }
 
@@ -241,7 +279,7 @@ export function build(
       const blankBefore = content[start - 1] === 0x0a && content[start - 2] === 0x0a;
       if (blankBefore && content[end] === 0x0a) end += 1;
 
-      return { range: { start, end }, text: "", contentAt: start };
+      return { range: { start, end }, text: "", contentAt: start, contentEnd: start };
     }
   }
 }

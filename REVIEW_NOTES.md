@@ -17,6 +17,8 @@ I hit the same thing: my single edit on #NB came back with invalidated #BW #BX #
 
 The concrete suggestion I'd offer: have edit return handles for the nodes it created, at the granularity it created them. Replacing one function → one handle is right. Inserting three functions → three handles would be far more useful than one coarse span, and would keep the agent inside the handle workflow instead of dropping out of it to re-discover.
 
+**Fixed.** `outcome()` now mints one handle per top-level item introduced within the edit's splice, not just whichever one happened to start exactly at the splice offset. See PLAN.md § M4.
+
 A fluent finding from doing this myself, and a sharp one: I targeted the corner check via a handle find reported as #X7 [geometry.rs::expr] :116 — the snippet it showed me was the comment line, so I assumed the handle covered the comment and its if. It covered only the single line. My replace inserted the new check and left the old one intact, producing two consecutive guards.
 
 ## Test environment — TypeScript LSP

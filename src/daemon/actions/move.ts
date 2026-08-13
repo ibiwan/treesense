@@ -149,6 +149,7 @@ async function moveSameFile(
     first === insertSplice
       ? insertSplice.contentAt - (deleteSplice.range.end - deleteSplice.range.start)
       : insertSplice.contentAt;
+  const contentEnd = contentAt + (insertSplice.contentEnd - insertSplice.contentAt);
 
   const lang = languageFor(source.file);
   if (lang !== null && parse(content, lang).hasParseError()) {
@@ -176,7 +177,7 @@ async function moveSameFile(
   const r1 = ws.handles.rebase(source.file, first.range, Buffer.byteLength(first.text, "utf8"), generation);
   const r2 = ws.handles.rebase(source.file, second.range, Buffer.byteLength(second.text, "utf8"), generation);
 
-  return report(ws, source.file, source.handle, contentAt, args.action, [...r1.killed, ...r2.killed]);
+  return report(ws, source.file, source.handle, contentAt, contentEnd, args.action, [...r1.killed, ...r2.killed]);
 }
 
 async function moveCrossFile(
@@ -241,8 +242,8 @@ async function moveCrossFile(
   );
 
   const freshDest = await locate(ws, destination.file);
-  const introduced = freshDest === null ? null : outcome(freshDest, insertSplice.contentAt, args.action);
-  const newHandle = freshDest !== null && introduced !== null ? mint(ws, freshDest, introduced) : null;
+  const introduced = freshDest === null ? [] : outcome(freshDest, insertSplice, args.action);
+  const newHandle = freshDest !== null && introduced.length > 0 ? mint(ws, freshDest, introduced[0]!) : null;
   const inserted = newHandle === null ? `${destination.file} ok` : handlePlus(newHandle, { withPath: true, root: ws.root });
 
   // The destination write already landed — from here on, a bad verdict is a
@@ -311,13 +312,16 @@ async function report(
   file: Full["file"],
   sourceHandle: Handle,
   contentAt: number,
+  contentEnd: number,
   action: MoveArgs["action"],
   killedRaw: Handle[],
 ): Promise<Reply> {
   const fresh: Located | null = await locate(ws, file);
-  const introduced = fresh === null ? null : outcome(fresh, contentAt, action);
+  const introduced = fresh === null ? [] : outcome(fresh, { contentAt, contentEnd }, action);
   const summary =
-    fresh === null || introduced === null ? `${file} ok` : handlePlus(mint(ws, fresh, introduced), { withPath: true, root: ws.root });
+    fresh === null || introduced.length === 0
+      ? `${file} ok`
+      : handlePlus(mint(ws, fresh, introduced[0]!), { withPath: true, root: ws.root });
 
   const killed = killedRaw.filter((h) => h !== sourceHandle);
   const lines = [summary];
