@@ -21,6 +21,8 @@ The concrete suggestion I'd offer: have edit return handles for the nodes it cre
 
 A fluent finding from doing this myself, and a sharp one: I targeted the corner check via a handle find reported as #X7 [geometry.rs::expr] :116 — the snippet it showed me was the comment line, so I assumed the handle covered the comment and its if. It covered only the single line. My replace inserted the new check and left the old one intact, producing two consecutive guards.
 
+**Fixed.** The root cause: a `find` match inside a comment rendered with the same generic `[file::expr] expr` label as any other unmapped node, so nothing in the response distinguished "this handle is just a comment" from "this handle is a real expression." `NodeKind` now has a dedicated `comment` value; a comment-only hit now reads `[file::comment] :N comment`, immediately legible as not-code. See PLAN.md § M1.
+
 ## Test environment — TypeScript LSP
 
 `npm run test:all` is green with the Rust toolchain present (72 pass, 3 skip

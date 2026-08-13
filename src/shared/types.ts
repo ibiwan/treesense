@@ -43,6 +43,7 @@ export type NodeKind =
   | "stmt"
   | "expr"
   | "ident"
+  | "comment"
   | "file"
   | "range";
 

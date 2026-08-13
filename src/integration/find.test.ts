@@ -139,6 +139,18 @@ describe("find", { skip }, () => {
     assert.match(res.text, /värde/, "non-ASCII needles must round-trip");
   });
 
+  test("a hit inside a comment is labeled comment, not the generic expr fallback", async () => {
+    // "ceiling" appears both in `clamp`'s doc comment ("Clamps to a ceiling")
+    // and in the code right below it. A comment-only match rendered as
+    // generic `expr` is indistinguishable from a code match — which is
+    // exactly what caused a duplicated guard clause during dogfooding. See
+    // REVIEW_NOTES.md.
+    const res = await fx.rpc({ op: "find", needle: "ceiling", haystack: "crates/helper/src/lib.rs" });
+    assert.ok(res.ok, res.text);
+    assert.match(res.text, /::comment\] :\d+ comment/, `comment hit must say so:\n${res.text}`);
+    assert.match(res.text, /::ceiling\] :\d+ ident ceiling/, `code hits are unaffected:\n${res.text}`);
+  });
+
   test("literal search works in files no grammar covers", async () => {
     // The fixture carries a .md and a .toml precisely for this path. `read`
     // already falls back to literal lines for them; a text search that cannot

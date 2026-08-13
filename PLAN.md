@@ -51,6 +51,19 @@ invariant the offset layer exists to hold.
 asserting known offsets resolve to the right kinds and byte ranges — including
 a case with non-ASCII, since that is where the conversion earns its keep.
 
+**Comments rendered as generic `expr` (fixed).** Dogfooding surfaced a second
+real gap, recorded in REVIEW_NOTES.md: `find`'s literal search matches inside
+comments same as code, but a comment-only hit rendered with the same generic
+`expr` fallback as any other unmapped node — indistinguishable from a real
+expression, which cost a dogfooding session a duplicated guard clause when a
+match inside a doc comment above an `if` was mistaken for one in the `if`
+itself. `NodeKind` now has a dedicated `comment` value, mapped from
+`line_comment`/`block_comment`/`doc_comment` (Rust) and `comment` (TS/JS,
+shared via the existing fallback). Rust doc comments (`///`, `/** */`) nest
+their text in a named `doc_comment` child that `nodeAt` finds instead of the
+outer comment node, so that raw kind needed its own entry too. Covered by a
+new case in `find.test.ts`.
+
 ## M2 — `refs`
 
 First verb to mint handles. Two tasks live here that the stub does not mention:

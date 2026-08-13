@@ -72,6 +72,13 @@ function agLang(lang: Language): string {
  * (`function_item` / `function_declaration` / `function_definition` are one
  * concept in three spellings) and the model should not have to know which
  * language it is looking at to read a response.
+ *
+ * Comments are mapped explicitly rather than left to the `expr` fallback: a
+ * literal `find` matches inside comments same as code, and a comment-only hit
+ * rendered as generic `expr` is indistinguishable from a real expression
+ * node — which cost a real dogfooding session a duplicated guard clause when
+ * a match inside a doc comment was mistaken for one in the code below it.
+ * See REVIEW_NOTES.md.
  */
 const KIND_MAP: Record<Language, Record<string, NodeKind>> = {
   rust: {
@@ -96,6 +103,13 @@ const KIND_MAP: Record<Language, Record<string, NodeKind>> = {
     identifier: "ident",
     field_identifier: "ident",
     type_identifier: "ident",
+    line_comment: "comment",
+    block_comment: "comment",
+    // `///` and `/** */` doc comments nest their text in a named `doc_comment`
+    // child — `nodeAt` finds that innermost node, not the outer `*_comment`,
+    // so it needs the same mapping or a doc-comment match still falls to
+    // `expr`. Plain `//`/`/* */` comments have no such child.
+    doc_comment: "comment",
   },
   typescript: {
     function_declaration: "fn",
@@ -114,6 +128,7 @@ const KIND_MAP: Record<Language, Record<string, NodeKind>> = {
     while_statement: "loop",
     identifier: "ident",
     property_identifier: "ident",
+    comment: "comment",
   },
   javascript: {},
   tsx: {},
